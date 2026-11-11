@@ -1,0 +1,45 @@
+{
+  "name": "grasp-dev",
+  "displayName": "GraspDev",
+  "description": "サイドバーで動くコーディングエージェント。コードベースを調査し、指示の実装・質問への回答を行います (OpenAI API)。",
+  "version": "0.1.0",
+  "publisher": "local",
+  "private": true,
+  "engines": { "vscode": "^1.90.0" },
+  "categories": ["AI", "Chat"],
+  "main": "./dist/extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        { "id": "graspDev", "title": "GraspDev", "icon": "media/icon.svg" }
+      ]
+    },
+    "views": {
+      "graspDev": [
+        { "type": "webview", "id": "graspDev.chat", "name": "Chat" }
+      ]
+    },
+    "commands": [
+      { "command": "graspDev.openSettings", "title": "GraspDev: 設定", "icon": "$(gear)" },
+      { "command": "graspDev.focus", "title": "GraspDev: チャットを開く" }
+    ],
+    "menus": {
+      "view/title": [
+        { "command": "graspDev.openSettings", "when": "view == graspDev.chat", "group": "navigation" }
+      ]
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "node esbuild.mjs --test && node --test \"dist-test/*.js\""
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/vscode": "1.90.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.6.0"
+  }
+}
