@@ -38,6 +38,9 @@ export class OpenAIChatProvider implements LLMProvider {
       }));
     }
     if (req.reasoningEffort) body.reasoning_effort = req.reasoningEffort;
+    if (req.jsonSchema) {
+      body.response_format = { type: 'json_schema', json_schema: { name: req.jsonSchema.name, schema: req.jsonSchema.schema, strict: true } };
+    }
 
     let text = '';
     let usage: Usage | undefined;

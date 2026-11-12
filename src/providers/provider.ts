@@ -12,6 +12,8 @@ export interface CompletionRequest {
   messages: Message[];
   tools: ToolSpec[];
   reasoningEffort?: string;
+  /** 指定すると、応答をこのJSONスキーマに従うJSON文字列にする (エージェント本体のループでは使わない)。 */
+  jsonSchema?: { name: string; schema: JSONSchema };
   signal?: AbortSignal;
 }
 

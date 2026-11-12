@@ -41,6 +41,7 @@ export class OpenAIResponsesProvider implements LLMProvider {
     }
     if (this.includeReasoning) body.include = ['reasoning.encrypted_content'];
     if (req.reasoningEffort) body.reasoning = { effort: req.reasoningEffort };
+    if (req.jsonSchema) body.text = { format: { type: 'json_schema', name: req.jsonSchema.name, schema: req.jsonSchema.schema, strict: true } };
 
     const raw: any[] = [];
     const toolCalls: ToolCall[] = [];

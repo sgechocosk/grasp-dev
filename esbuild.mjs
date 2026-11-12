@@ -14,6 +14,8 @@ if (args.includes('--test')) {
     target: 'node20',
     outdir: 'dist-test',
     sourcemap: 'inline',
+    // 画面のホスト (ChatViewProvider) もテストできるよう、vscode はテスト用の代わりに差し替える
+    alias: { vscode: './test/stubs/vscode.ts' },
   });
 } else {
   const ctx = await esbuild.context({
