@@ -6,6 +6,7 @@ import * as path from 'node:path';
 import { test } from 'node:test';
 import { CONFIG } from '../src/config';
 import type { AssistantMessage, ToolCall } from '../src/core/types';
+import type { CompletionRequest } from '../src/providers/provider';
 import { ProviderRegistry } from '../src/providers/provider';
 import { createDefaultToolRegistry } from '../src/tools';
 import { ChatViewProvider } from '../src/ui/chatViewProvider';
@@ -18,7 +19,7 @@ const reply = (content: string, toolCalls: ToolCall[] = []): AssistantMessage =>
 const ORIGINAL = 'export function double(n: number): number {\n  return n * 2;\n}\n';
 
 /** 画面のホストを、台本どおりに応答するプロバイダと、テスト用の画面で動かす */
-function harness(settings: Record<string, unknown>, json: (name: string) => unknown = () => ({})) {
+function harness(settings: Record<string, unknown>, json: (name: string) => unknown = () => ({}), ask = false) {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'grasp-host-'));
   fs.writeFileSync(path.join(cwd, 'calc.ts'), ORIGINAL);
   const git = (...args: string[]) => execFileSync('git', args, { cwd, stdio: 'pipe' });
@@ -30,16 +31,21 @@ function harness(settings: Record<string, unknown>, json: (name: string) => unkn
   const file = path.join(cwd, 'calc.ts');
   const script = [
     reply('読みます', [call('r1', 'Read', { file_path: file })]),
+    ...(ask
+      ? [reply('', [call('q1', 'AskUser', { questions: [{ question: 'どう計算しますか', why: '書き方が複数ある', options: [{ label: '加算', detail: 'n + n' }, { label: 'シフト', detail: 'n << 1' }] }] })])]
+      : []),
     reply('直します', [call('e1', 'Edit', { file_path: file, old_string: 'n * 2', new_string: 'n + n' })]),
-    reply('', [call('b1', 'Bash', { command: 'echo secret-output' })]),
+    reply('', [call('b1', 'Bash', { command: 'echo secret-output && exit 2' })]),
     reply('足し算に変えました。'),
   ];
   let i = 0;
+  const seen: CompletionRequest[] = [];
   const providers = new ProviderRegistry();
   providers.register(CONFIG.provider, () => ({
     id: 'scripted',
     async complete(req, onEvent) {
       if (req.jsonSchema) return { message: reply(JSON.stringify(json(req.jsonSchema.name))) };
+      seen.push({ ...req, messages: [...req.messages] });
       const message = script[i++];
       if (message.content) onEvent({ type: 'text', delta: message.content });
       return { message };
@@ -63,6 +69,8 @@ function harness(settings: Record<string, unknown>, json: (name: string) => unkn
         posted.push(m);
         // 許可の確認には、画面の代わりに「許可」と答える
         if (m.type === 'permission_request') receive({ type: 'permission_response', toolCallId: m.toolCallId, decision: { behavior: 'allow' } });
+        // 実装の前の質問には、最初の案を選んで答える
+        if (m.type === 'ask') receive({ type: 'ask_response', id: m.id, answers: m.questions.map((q) => q.options[0].label) });
         return true;
       },
       onDidReceiveMessage: (fn: (m: WebviewMessage) => void) => { receive = fn; },
@@ -71,7 +79,7 @@ function harness(settings: Record<string, unknown>, json: (name: string) => unkn
     show: () => undefined,
   } as any);
   const send = (m: WebviewMessage) => (host as any).onMessage(m) as Promise<void>;
-  return { cwd, file, posted, send };
+  return { cwd, file, posted, send, seen };
 }
 
 const events = (posted: HostMessage[]) => posted.flatMap((m) => (m.type === 'event' ? [m.event] : []));
@@ -104,11 +112,28 @@ test('理解モード: 実行中は作業の中身を出さず、たどり終え
 
   // 反映のあとに、控えていた作業の記録と報告が出る
   const record = h.posted.find((m) => m.type === 'record') as any;
-  assert.deepEqual(record.items.map((t: any) => t.name ?? t.kind), ['assistant', 'Read', 'assistant', 'Edit', 'Bash']);
+  // 実装の報告 (「〜しました」) は、手順のあとに並べず、記録の中に入れる
+  assert.deepEqual(record.items.map((t: any) => t.name ?? t.kind), ['assistant', 'Read', 'assistant', 'Edit', 'Bash', 'assistant']);
   assert.match(record.items[4].output, /secret-output/);
-  const lastEvent = events(h.posted).pop() as any;
-  assert.deepEqual([lastEvent.type, lastEvent.text], ['assistant_end', '足し算に変えました。']);
+  assert.ok(!events(h.posted).some((e) => e.type === 'assistant_end'));
+  // 失敗したコマンドは、出力を開いて原因を確かめられる
+  assert.deepEqual(h.posted.filter((m) => m.type === 'tool_failure').map((m: any) => m.output), ['secret-output\nExit code: 2']);
   assert.equal((h.posted.filter((m) => m.type === 'state').pop() as any).state.holding, false);
+});
+
+test('理解モード: 受け入れ条件が一つに決まらないときは、実装の前に利用者へ尋ねる', async () => {
+  const h = harness({}, () => ({ understanding: '', acceptanceCriteria: [], overall: '', steps: [], sites: [], items: [], fixes: [] }), true);
+  await h.send({ type: 'send', text: '2倍の計算を直して' });
+  // 尋ねる道具と指示が加わり、質問は編集の前に画面へ出る
+  assert.ok(h.seen[0].tools.some((t) => t.name === 'AskUser'));
+  assert.match(h.seen[0].system, /Decisions that belong to the user/);
+  const ask = h.posted.find((m) => m.type === 'ask') as any;
+  assert.equal(ask.questions[0].question, 'どう計算しますか');
+  // 利用者の決定がモデルに渡り、そのあとで実装が続く
+  const answer = h.seen[2].messages.find((m) => m.role === 'tool' && m.toolCallId === 'q1') as any;
+  assert.match(answer.content, /どう計算しますか\n {3}→ 加算/);
+  assert.equal(fs.readFileSync(h.file, 'utf8'), ORIGINAL);
+  assert.ok(h.posted.some((m) => m.type === 'walk' && m.message.type === 'walk_start'));
 });
 
 test('理解モードをオフにすると、従来どおりすぐファイルに書き、作業をそのまま表示する', async () => {
@@ -119,6 +144,8 @@ test('理解モードをオフにすると、従来どおりすぐファイル�
   assert.deepEqual(live.filter((e) => e.type === 'tool_start').map((e: any) => e.name), ['Read', 'Edit', 'Bash']);
   assert.ok(live.some((e) => e.type === 'assistant_end' && e.text === '足し算に変えました。'));
   assert.ok(!h.posted.some((m) => m.type === 'walk' || m.type === 'record'));
+  assert.ok(!h.seen[0].tools.some((t) => t.name === 'AskUser'));
+  assert.ok(!/Decisions that belong to the user/.test(h.seen[0].system));
   assert.deepEqual(h.posted.filter((m) => m.type === 'permission_request').map((m: any) => m.toolCallId), ['b1']);
 });
 

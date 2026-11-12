@@ -171,6 +171,21 @@
     }
   }
 
+  /** 失敗したコマンドの出力。変更内容を含むことがあるので、開いたときだけ見せる */
+  function addFailure(id, output) {
+    const box = toolEls.get(id);
+    if (!box || box.querySelector('.tfail')) return;
+    const lines = String(output || '').trim().split('\n');
+    const status = lines[lines.length - 1] || '';
+    const d = el('details', 'tfail');
+    d.appendChild(el('summary', '', `失敗しました(${esc(status)})。出力を見る — 変更内容が含まれることがあります`));
+    const pre = el('pre', 'tout');
+    pre.textContent = clip(output);
+    d.appendChild(pre);
+    box.querySelector('.tbody').appendChild(d);
+    box.open = true;
+  }
+
   function showPermission(toolCallId, key) {
     const box = toolEls.get(toolCallId);
     if (!box) return;
@@ -200,6 +215,7 @@
     else if (item.kind === 'assistant') addAssistant(item.text);
     else if (item.kind === 'tool') addTool(item);
     else if (item.kind === 'walk') onWalk(item.message);
+    else if (item.kind === 'ask') addAsk(item);
     else if (item.kind === 'record') addRecord(item.items);
     else addNote(item.kind, item.text);
   }
@@ -220,9 +236,77 @@
     }
   }
 
+  // ---------- 実装の前に決めること ----------
+  const askEls = new Map();
+
+  /** 受け入れ条件が一つに決まらないとき、どう作るかを利用者が選ぶ */
+  function addAsk(item) {
+    const card = el('section', 'wstep ask');
+    card.appendChild(textBlock('wlabel', '実装の前に決めること'));
+    const done = Array.isArray(item.answers);
+    const picked = item.questions.map(() => -1);
+    const inputs = [];
+    const send = el('button', 'primary');
+    const refresh = () => { send.disabled = picked.some((p, i) => p < 0 && !inputs[i].value.trim()); };
+    item.questions.forEach((q, i) => {
+      const sec = section('');
+      sec.appendChild(textBlock('qtitle', q.question));
+      if (q.why) sec.appendChild(textBlock('small', q.why));
+      const opts = el('div', 'qopts col');
+      q.options.forEach((o, n) => {
+        const b = el('button', 'opt choice');
+        b.appendChild(el('span', 'olabel', esc(o.label) + (n === 0 ? '<span class="tag">おすすめ</span>' : '')));
+        if (o.detail) b.appendChild(el('span', 'odetail', esc(o.detail)));
+        if (done) {
+          b.disabled = true;
+          if (item.answers[i] === o.label) b.classList.add('sel');
+        }
+        b.addEventListener('click', () => {
+          picked[i] = picked[i] === n ? -1 : n;
+          opts.querySelectorAll('.opt').forEach((x, k) => x.classList.toggle('sel', k === picked[i]));
+          refresh();
+        });
+        opts.appendChild(b);
+      });
+      sec.appendChild(opts);
+      const input = el('input', 'other');
+      input.type = 'text';
+      input.placeholder = 'ほかの案・補足があれば入力';
+      input.addEventListener('input', refresh);
+      if (done) {
+        input.disabled = true;
+        if (!q.options.some((o) => o.label === item.answers[i])) input.value = item.answers[i] || '';
+      }
+      inputs.push(input);
+      sec.appendChild(input);
+      card.appendChild(sec);
+    });
+    if (!done) {
+      send.textContent = 'この方針で進める';
+      send.addEventListener('click', () => {
+        // 選んだ案に、補足があれば添える
+        const answers = item.questions.map((q, i) => {
+          const choice = picked[i] >= 0 ? q.options[picked[i]].label : '';
+          const note = inputs[i].value.trim();
+          return choice && note ? `${choice}(補足: ${note})` : choice || note;
+        });
+        card.querySelectorAll('button, input').forEach((x) => (x.disabled = true));
+        send.remove();
+        vscode.postMessage({ type: 'ask_response', id: item.id, answers });
+      });
+      refresh();
+      const actions = el('div', 'wactions');
+      actions.appendChild(send);
+      card.appendChild(actions);
+    }
+    askEls.set(item.id, card);
+    append(card);
+    card.scrollIntoView({ block: 'start' });
+  }
+
   // ---------- たどる手順 ----------
   const BLANK = '___BLANK___';
-  const VERDICT = { changed: '変更した', checked: '読んだうえで変更なし', unseen: '未確認' };
+  const VERDICT = { changed: '変更が必要', checked: '変更は不要', unseen: '未確認' };
   const walks = new Map(); // walk の番号 → { el, kind, steps: Map(index → stepState) }
 
   function fileLink(path, line, text) {
@@ -305,6 +389,7 @@
     head.appendChild(hintBtn);
     box.appendChild(head);
     const opts = el('div', 'qopts');
+    st.optEls[k] = opts;
     b.options.forEach((code, i) => {
       const o = el('button', 'opt');
       o.textContent = code;
@@ -359,7 +444,7 @@
 
   function addStep(w, v) {
     const reading = w.kind === 'reading';
-    const st = { view: v, chosen: [], next: new Set(), blankEls: [], blankBoxes: [], locked: false, refresh: () => {} };
+    const st = { view: v, chosen: [], next: new Set(), blankEls: [], blankBoxes: [], optEls: [], locked: false, refresh: () => {} };
     const card = el('section', 'wstep');
     card.appendChild(el('div', 'whead', `<span class="wnum">${reading ? '読みどころ' : 'ステップ'} ${v.number}/${v.total}</span><span class="tag">${esc(v.kind)}</span>`));
     st.labelEl = textBlock('wlabel', v.label);
@@ -371,7 +456,7 @@
       card.appendChild(sec);
     }
     if (v.contract) {
-      const sec = section('変わる約束');
+      const sec = section('ほかの場所に影響する変更点');
       st.contractEl = textBlock('', v.contract);
       sec.appendChild(st.contractEl);
       card.appendChild(sec);
@@ -384,7 +469,11 @@
       where.appendChild(fileLink(it.path, it.startLine));
       sec.appendChild(where);
       if (it.newNames && it.newNames.length) {
-        sec.appendChild(textBlock('names', '新しく作る名前: ' + it.newNames.map((n) => n.name + (n.role ? `(${n.role})` : '')).join('、')));
+        // この変更で初めて登場する変数・関数など。どこにも定義が無い名前なので、先に示しておく
+        const names = el('div', 'names');
+        names.appendChild(textBlock('small', 'この変更で新しく追加する変数・関数'));
+        it.newNames.forEach((n) => names.appendChild(el('div', 'nrow', `<code>${esc(n.name)}</code>${n.role ? `<span>${esc(n.role)}</span>` : ''}`)));
+        sec.appendChild(names);
       }
       (it.refs || []).forEach((r) => {
         const d = el('div', 'wtext ref');
@@ -472,6 +561,11 @@
         span.textContent = b.answer;
         span.classList.add('filled', b.correct ? 'ok' : 'attn');
       }
+      // 選択肢の中で、このコードになるものと、選んだものを色で示す
+      [...(st.optEls[k] ? st.optEls[k].children : [])].forEach((o, i) => {
+        if (i === b.correctIndex) o.classList.add('ok');
+        else if (i === b.chosen) o.classList.add('attn');
+      });
       const box = st.blankBoxes[k];
       if (!box) return;
       const res = el('div', 'qres ' + (b.correct ? 'ok' : 'attn'));
@@ -544,7 +638,7 @@
       }
     });
     card.appendChild(files);
-    const ran = section('実行して確かめたこと');
+    const ran = section('動作確認に実行したコマンド');
     if (f.commands.length) f.commands.forEach((c) => ran.appendChild(el('div', 'cmdrow ' + (c.ok ? 'ok' : 'attn'), `${c.ok ? '✓' : '!'} <code>${esc(c.command)}</code>`)));
     else ran.appendChild(textBlock('small', 'テストやビルドなどのコマンドは実行されていません。'));
     card.appendChild(ran);
@@ -601,9 +695,6 @@
         const sec = section(v.kind === 'reading' ? '読みどころ' : '実装するステップ');
         v.map.forEach((s) => sec.appendChild(el('div', 'maprow', `<span class="mno">${s.number}.</span><span>${esc(s.label)}</span><span class="tag">${esc(s.kind)}</span>`)));
         head.appendChild(sec);
-      }
-      if (v.kind !== 'reading') {
-        head.appendChild(textBlock('small', '変更はまだファイルに書き込まれていません。手順をたどり終えると、まとめて反映できます。'));
       }
       box.appendChild(head);
       append(box);
@@ -702,9 +793,7 @@
     inputEl.disabled = !s.hasKey || !s.hasWorkspace;
     inputEl.placeholder = !s.hasWorkspace
       ? 'フォルダを開くと利用できます'
-      : s.holding
-        ? '続きの指示を入力すると、取り置いた変更を戻して作業を続けます'
-        : '質問や実装の指示を入力… (Shift+Enterで改行)';
+      : '質問や実装の指示を入力… (Shift+Enterで改行)';
     updateStatus();
   }
 
@@ -750,6 +839,7 @@
         messagesEl.innerHTML = '';
         toolEls.clear();
         walks.clear();
+        askEls.clear();
         streaming = null;
         $('meta').textContent = '';
         m.transcript.forEach(renderItem);
@@ -765,6 +855,9 @@
       case 'user': addUser(m.text); break;
       case 'event': onEvent(m.event); break;
       case 'walk': onWalk(m.message); break;
+      case 'ask': addAsk(m); break;
+      case 'ask_cancel': askEls.get(m.id)?.querySelectorAll('button, input').forEach((x) => (x.disabled = true)); break;
+      case 'tool_failure': addFailure(m.id, m.output); break;
       case 'record': addRecord(m.items); break;
       case 'progress': progress = m.counts; updateStatus(); break;
       case 'status': statusNote = m.text; updateStatus(); break;

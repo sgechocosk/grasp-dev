@@ -1,5 +1,6 @@
 import type { PermissionDecision } from '../core/permissions';
 import type { AgentEvent } from '../core/types';
+import type { AskQuestion } from '../understand/askUser';
 import type { ToolCounts } from '../understand/recorder';
 import type { WalkMessage } from '../understand/session';
 
@@ -20,6 +21,8 @@ export type TranscriptItem =
   | { kind: 'assistant'; text: string }
   | ToolItem
   | { kind: 'info' | 'error'; text: string }
+  /** 実装の前に利用者へ尋ねたこと (answers があれば回答済み) */
+  | { kind: 'ask'; id: string; questions: AskQuestion[]; answers?: string[] }
   /** たどる手順の1コマ */
   | { kind: 'walk'; message: WalkMessage }
   /** 手順をたどり終えてから開示する、作業の記録 */
@@ -47,6 +50,10 @@ export type HostMessage =
   | { type: 'walk'; message: WalkMessage }
   | { type: 'record'; items: TranscriptItem[] }
   | { type: 'progress'; counts: ToolCounts }
+  | { type: 'ask'; id: string; questions: AskQuestion[] }
+  | { type: 'ask_cancel'; id: string }
+  /** 失敗したコマンドの出力 (変更内容を含みうるので、利用者が開いたときだけ見せる) */
+  | { type: 'tool_failure'; id: string; output: string }
   | { type: 'status'; text: string }
   | { type: 'permission_request'; toolCallId: string; key: string }
   | { type: 'permission_cancel'; toolCallId: string };
@@ -62,6 +69,7 @@ export type WebviewMessage =
   | { type: 'openFile'; path: string; line?: number }
   | { type: 'walk_answer'; index: number; blanks: number[]; next: number[] }
   | { type: 'walk_next' }
+  | { type: 'ask_response'; id: string; answers: string[] }
   | { type: 'walk_apply' }
   | { type: 'walk_discard' }
   | { type: 'permission_response'; toolCallId: string; decision: PermissionDecision };

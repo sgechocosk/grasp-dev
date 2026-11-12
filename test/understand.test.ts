@@ -309,6 +309,11 @@ function lessonJson(name: string, prompt: string): unknown {
       ),
     };
   }
+  if (name === 'voice_fix') {
+    // 報告の形 (〜しました) の文章だけが、書き直しに回ってくる
+    const ids = [...prompt.matchAll(/^id: (v\d+)\n現在の文章: (.*)$/gm)];
+    return { fixes: ids.map(([, id, text]) => ({ id, text: text.replace('合わせました', '合わせる') })) };
+  }
   return { fixes: [] };
 }
 
@@ -366,7 +371,8 @@ test('実装の依頼: 変更を取り置き、確定したコードから問い
   session.answer(0, { blanks: [wrong], next: [step1.view.question.options.indexOf('src/cart.ts の cartTotal')] });
   const reveal = posted[2] as any;
   assert.equal(reveal.type, 'walk_reveal');
-  assert.deepEqual(reveal.view.blanks, [{ correct: false, answer: '(1 + rate)', chosen: wrong, why: '税率を足した倍率を掛ける', note: '値引きになる' }]);
+  const correctIndex = item.blanks[0].options.indexOf('(1 + rate)');
+  assert.deepEqual(reveal.view.blanks, [{ correct: false, answer: '(1 + rate)', chosen: wrong, correctIndex, why: '税率を足した倍率を掛ける', note: '値引きになる' }]);
   assert.equal(reveal.view.question.correct, false);
   assert.match(reveal.view.why, /amount \* \(1 \+ rate\)/);
   const results = reveal.view.checks[0].results;
@@ -397,7 +403,10 @@ test('実装の依頼: 変更を取り置き、確定したコードから問い
 
   // 理解のための問い合わせは、エージェントの会話を書き換えない
   assert.equal(historyBefore(), history);
-  assert.deepEqual(provider.asked.sort(), ['change_interview', 'leak_fix', 'step_quiz', 'step_quiz']);
+  assert.deepEqual(provider.asked.sort(), ['change_interview', 'leak_fix', 'step_quiz', 'step_quiz', 'voice_fix']);
+  // 「〜しました」という報告の形は、これから実装する手順としての言い方に直される
+  assert.match(final.view.overall, /呼び出し元の cart\.ts を合わせる。/);
+  assert.ok(!/しました/.test(JSON.stringify(posted)));
 
   await session.apply();
   assert.equal(posted[posted.length - 1].type, 'walk_done');

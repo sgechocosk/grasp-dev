@@ -3,7 +3,8 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { test } from 'node:test';
-import { bashTool } from '../src/tools/bash';
+import { bashTool, decodeOutput } from '../src/tools/bash';
+import { shellNote } from '../src/core/systemPrompt';
 import { editTool, writeTool } from '../src/tools/edit';
 import { readTool } from '../src/tools/read';
 import { globToRegExp, globTool, grepTool } from '../src/tools/search';
@@ -114,4 +115,15 @@ test('Bash: 出力・終了コード・タイムアウト・許可キー', async
   assert.equal(bashTool.permissionKey!({ command: 'npm test -- --watch' }), 'Bash(npm test *)');
   assert.equal(bashTool.permissionKey!({ command: 'ls -la' }), 'Bash(ls *)');
   assert.equal(bashTool.permissionKey!({ command: 'git status && rm -rf /' }), 'Bash(git status && rm -rf /)');
+});
+
+test('Bash: Windows の従来の文字コードの出力を読める。Windows ではシェルの書き方を伝える', () => {
+  // 「エラー: JAVA_HOME が見つかりません」を Shift_JIS にしたバイト列
+  const sjis = Buffer.from('83478389815b3a204a4156415f484f4d452082aa8ca982c282a982e882dc82b982f1', 'hex');
+  assert.equal(decodeOutput(sjis, 'win32', 'shift_jis'), 'エラー: JAVA_HOME が見つかりません');
+  assert.equal(decodeOutput(Buffer.from('ビルド成功', 'utf8'), 'win32', 'shift_jis'), 'ビルド成功');
+  // 上限で切れて末尾の文字が不完全でも、UTF-8 として読む
+  assert.equal(decodeOutput(Buffer.from('成功', 'utf8').subarray(0, 4), 'win32', 'shift_jis'), '成');
+  assert.equal(shellNote('linux'), '');
+  assert.match(shellNote('win32'), /cmd\.exe/);
 });

@@ -24,8 +24,8 @@ export function renderHtml(o: HtmlOptions): string {
     <button id="keySave">保存</button>
     <button id="settingsClose" class="secondary">閉じる</button>
   </div>
-  <label class="check"><input id="understand" type="checkbox"> 変更を取り置き、手順をたどってから反映する</label>
-  <p>オフにすると、変更はすぐファイルに書き込まれ、手順は示しません。</p>
+  <label class="check"><input id="understand" type="checkbox"> 変更の理由と影響を確かめてから反映する</label>
+  <p>オフにすると、手順を示さずにそのまま実装します。</p>
   <label for="level">経験レベル</label>
   <select id="level">
     <option value="beginner">基本(用語を言い換え、基本の仕組みから)</option>

@@ -1,4 +1,4 @@
-import { levelStyle, type LearnerLevel } from './lib/level';
+import { levelStyle, soundsLikeReport, type LearnerLevel } from './lib/level';
 import { maskAnswers, revealsAnswer } from './lib/leak';
 import { splitLines } from './lib/text';
 import type { CodeRef, QuizItem } from './lib/types';
@@ -243,4 +243,58 @@ export async function removeAnswerLeaks(
     }
   }
   quiz.goal = goal.value;
+}
+
+// ---------- 利用者が主体の言い方にそろえる ----------
+
+/** 文章の置き場所 (読む・書き戻す) */
+export interface TextSlot {
+  get: () => string;
+  set: (text: string) => void;
+}
+
+const VOICE_FIX_SCHEMA = { name: 'voice_fix', schema: LEAK_FIX_SCHEMA.schema } as const;
+
+/**
+ * 「実装しました」のように、作業を済ませたという報告の形になっている文章を、
+ * 利用者がこれから実装する手順としての言い方に書き直させる。指示だけでは守られないので、機械的に見つけて直す。
+ */
+export async function rewriteReports(asker: Asker, level: LearnerLevel, slots: TextSlot[], signal: AbortSignal): Promise<void> {
+  const targets = slots.filter((s) => soundsLikeReport(s.get()));
+  if (targets.length === 0) return;
+  try {
+    const res = await asker.fresh<{ fixes?: Array<{ id: string; text: string }> }>(
+      [
+        'あなたはコードの理解を支援する文章の編集者です。以下の文章は、作業を済ませたという報告の形(「〜しました」「〜済みです」)で書かれています。',
+        '利用者がこれから自分の判断で実装していく手順として読めるように、内容は変えずに言い方だけを書き直してください。',
+        '「〜するために、〜を〜に変える」「〜する必要がある」「〜を追加する」のように、これから行うこととその理由を述べます。コードについて確かめた事実は現在形で述べます。',
+        '各 id について書き直した文章を返します。意味・固有の名前・ファイル名:行はそのまま残します。',
+        levelStyle(level),
+      ].join('\n'),
+      targets.map((s, i) => `id: v${i}\n現在の文章: ${s.get()}`).join('\n\n'),
+      VOICE_FIX_SCHEMA,
+      signal,
+    );
+    targets.forEach((slot, i) => {
+      const fix = (res.fixes ?? []).find((f) => f.id === `v${i}`)?.text?.trim();
+      if (fix && !soundsLikeReport(fix)) slot.set(fix);
+    });
+  } catch (error) {
+    if (signal.aborted) throw error;
+    // 書き直せなくても、内容は正しいのでそのまま使う
+  }
+}
+
+/** 問いの中の、利用者に見せる文章の置き場所 */
+export function itemSlots(item: QuizItem): TextSlot[] {
+  const slots: TextSlot[] = [
+    { get: () => item.task ?? '', set: (t) => (item.task = t) },
+    { get: () => item.explanation, set: (t) => (item.explanation = t) },
+  ];
+  for (const b of item.blanks) {
+    slots.push({ get: () => b.why ?? '', set: (t) => (b.why = t) });
+    b.hints.forEach((_, k) => slots.push({ get: () => b.hints[k], set: (t) => (b.hints[k] = t) }));
+    for (const c of b.choices ?? []) slots.push({ get: () => c.note, set: (t) => (c.note = t) });
+  }
+  return slots;
 }

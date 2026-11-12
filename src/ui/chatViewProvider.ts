@@ -8,7 +8,8 @@ import { PermissionManager, type PermissionDecision, type PermissionMode } from 
 import { buildSystemPrompt } from '../core/systemPrompt';
 import { createConversationState, type AgentEvent, type ConversationState } from '../core/types';
 import type { ProviderRegistry } from '../providers/provider';
-import { resolvePath, type ToolRegistry } from '../tools/tool';
+import { resolvePath, ToolRegistry } from '../tools/tool';
+import { ASK_INSTRUCTIONS, createAskUserTool, type AskQuestion } from '../understand/askUser';
 import { coerceLevel, type LearnerLevel } from '../understand/lib/level';
 import { createAsker } from '../understand/llm';
 import { UnderstandSession, type WalkMessage } from '../understand/session';
@@ -45,6 +46,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   /** 控えずに画面へ出したツール (許可の確認が要るもの) */
   private shownTools = new Set<string>();
   private runFailed = false;
+  /** 利用者の回答を待っている質問 */
+  private pendingAsks = new Map<string, (answers: string[] | undefined) => void>();
+  private askCount = 0;
 
   constructor(
     private context: vscode.ExtensionContext,
@@ -125,6 +129,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         await vscode.window.showTextDocument(uri, { preview: true, selection }).then(undefined, () => undefined);
         return;
       }
+      case 'ask_response':
+        this.pendingAsks.get(m.id)?.(Array.isArray(m.answers) ? m.answers.map(String) : []);
+        return;
       case 'walk_answer':
         this.session?.answer(m.index, { blanks: m.blanks, next: m.next });
         return;
@@ -175,16 +182,18 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       }
       this.hiding = !!session;
       this.runFailed = false;
+      // 理解モードでは、受け入れ条件が一つに決まらないときに利用者へ尋ねる道具と指示を足す
+      const instructions = [CONFIG.customInstructions, session ? ASK_INSTRUCTIONS : ''].filter((t) => t.trim()).join('\n\n');
 
       const agent = new Agent({
         provider,
-        tools: this.tools,
+        tools: session ? this.toolsWithAsk() : this.tools,
         permissions: this.permissions,
         state: this.state,
         cwd,
         model: CONFIG.model,
         reasoningEffort: CONFIG.reasoningEffort,
-        customInstructions: CONFIG.customInstructions,
+        customInstructions: instructions,
         maxTurns: CONFIG.maxTurns,
         autoCompactTokens: CONFIG.autoCompactTokens,
         rgPath: this.rgPath,
@@ -198,7 +207,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         const after = new AbortController();
         this.abort = after;
         this.post({ type: 'status', text: '変更を確認しています…' });
-        const system = await buildSystemPrompt({ cwd, model: CONFIG.model, customInstructions: CONFIG.customInstructions });
+        const system = await buildSystemPrompt({ cwd, model: CONFIG.model, customInstructions: instructions });
         const asker = createAsker({ provider, model: CONFIG.model, reasoningEffort: CONFIG.reasoningEffort, system, messages: () => this.state.messages });
         const started = await session
           .endRun({ request: text, asker, level: this.level(), signal: after.signal, failed: this.runFailed })
@@ -206,7 +215,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             this.onAgentEvent({ type: 'error', message: `変更の取り置きに失敗しました: ${(e as Error).message}` });
             return false;
           });
-        if (!started) this.revealHeld();
+        if (!started) this.revealHeld(true);
       }
     } finally {
       this.hiding = false;
@@ -231,18 +240,46 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.transcript.push({ kind: 'walk', message });
     this.post({ type: 'walk', message });
     // たどり終えた (反映・破棄・回答の開示) ら、控えていた作業の記録を見せる
-    if (message.type === 'walk_done' && message.outcome !== 'continued') this.revealHeld();
+    // 質問への回答はそのまま見せる。実装の報告は、利用者が主体の手順のあとに並べず、記録の中に入れる
+    if (message.type === 'walk_done' && message.outcome !== 'continued') this.revealHeld(message.outcome === 'read');
   }
 
-  /** 控えていた作業の記録と、最後の応答 (作業の報告・質問への回答) を画面に出す */
-  private revealHeld(): void {
+  /** 利用者に質問を見せて、回答を待つ (AskUser ツールから呼ばれる) */
+  private askUser(questions: AskQuestion[], signal: AbortSignal): Promise<string[] | undefined> {
+    const id = `ask${++this.askCount}`;
+    const item: TranscriptItem = { kind: 'ask', id, questions };
+    this.transcript.push(item);
+    return new Promise((resolve) => {
+      const finish = (answers: string[] | undefined) => {
+        if (!this.pendingAsks.delete(id)) return;
+        if (answers) item.answers = answers;
+        else this.post({ type: 'ask_cancel', id });
+        resolve(answers);
+      };
+      this.pendingAsks.set(id, finish);
+      signal.addEventListener('abort', () => finish(undefined), { once: true });
+      this.post({ type: 'ask', id, questions });
+      this.view?.show?.(true);
+    });
+  }
+
+  /** いつもの道具に、利用者へ尋ねる道具を足したもの */
+  private toolsWithAsk(): ToolRegistry {
+    const registry = new ToolRegistry();
+    for (const tool of this.tools.list()) registry.register(tool);
+    registry.register(createAskUserTool((questions, signal) => this.askUser(questions, signal)));
+    return registry;
+  }
+
+  /** 控えていた作業の記録を画面に出す。showAnswer なら、最後の応答 (質問への回答) は記録の外にそのまま出す */
+  private revealHeld(showAnswer: boolean): void {
     const items = this.heldItems;
     this.heldItems = [];
     this.shownTools.clear();
     if (items.length === 0) return;
     let answer: TranscriptItem | undefined;
     const last = items[items.length - 1];
-    if (last.kind === 'assistant') answer = items.pop();
+    if (showAnswer && last.kind === 'assistant') answer = items.pop();
     if (items.length > 0) {
       this.transcript.push({ kind: 'record', items });
       this.post({ type: 'record', items });
@@ -306,7 +343,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       case 'tool_end': {
         const item = this.heldItems.find((t) => t.kind === 'tool' && t.id === event.id);
         if (item?.kind === 'tool') Object.assign(item, { output: event.output.slice(0, MAX_TRANSCRIPT_OUTPUT), isError: event.isError, done: true });
-        if (this.shownTools.has(event.id)) this.post({ type: 'event', event: { ...event, output: '' } });
+        if (this.shownTools.has(event.id)) {
+          this.post({ type: 'event', event: { ...event, output: '' } });
+          // 失敗したコマンドは、原因 (環境の不備など) を確かめられるよう、出力を開けるようにする
+          if (event.isError) this.post({ type: 'tool_failure', id: event.id, output: event.output.slice(-MAX_TRANSCRIPT_OUTPUT) });
+        }
         this.post({ type: 'progress', counts: this.session?.counts ?? { read: 0, search: 0, edit: 0, command: 0 } });
         return;
       }

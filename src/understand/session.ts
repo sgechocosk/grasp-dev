@@ -89,7 +89,7 @@ export class UnderstandSession {
       await writeState(this.held.changes, 'after');
       await this.syncFileState(this.held.changes);
       this.held = undefined;
-      if (this.walk) this.closeWalk('continued', '取り置いた変更を戻して、作業を続けます。終わったら、変更全体をあらためてたどります。');
+      if (this.walk) this.closeWalk('continued', '作業を続けます。終わったら、変更全体をあらためてたどります。');
     }
     this.baseline ??= await Baseline.capture(this.o.cwd);
     const baseline = this.baseline;
@@ -125,7 +125,7 @@ export class UnderstandSession {
       return true;
     }
 
-    this.o.status('変更を取り置いています…');
+    this.o.status('変更を整理しています…');
     await writeState(changes, 'before');
     this.held = { changes, unheld };
     const base = { cwd: this.o.cwd, request: opts.request, changes, unheld, recorder };
@@ -226,7 +226,7 @@ export class UnderstandSession {
       'so those changes do not exist. Read files again before editing them.';
     this.held = undefined;
     this.baseline = undefined;
-    this.closeWalk('discarded', '変更を破棄しました。ファイルは変更前のままです。');
+    this.closeWalk('discarded', '変更を破棄しました。');
   }
 
   /**

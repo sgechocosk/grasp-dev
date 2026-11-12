@@ -8,6 +8,33 @@ const MAX_OUTPUT = 30_000;
 
 interface Input { command: string; timeout?: number; description?: string }
 
+/** ロケールから推定した、Windows の従来の文字コード (コンソールの出力が UTF-8 でないときに使う) */
+function legacyEncoding(): string {
+  const locale = Intl.DateTimeFormat().resolvedOptions().locale.toLowerCase();
+  if (locale.startsWith('ja')) return 'shift_jis';
+  if (locale.startsWith('ko')) return 'euc-kr';
+  if (locale.startsWith('zh')) return /tw|hk|hant/.test(locale) ? 'big5' : 'gbk';
+  return 'windows-1252';
+}
+
+/**
+ * コマンドの出力を文字列にする。UTF-8 として読めなければ、Windows では従来の文字コード (日本語なら Shift_JIS) として読む。
+ * cmd.exe や Java・Maven の出力は UTF-8 とは限らず、そのまま読むとエラーの文面が文字化けしてモデルが原因を読み取れない。
+ */
+export function decodeOutput(buf: Buffer, platform: string = process.platform, encoding: string = legacyEncoding()): string {
+  try {
+    // stream: true で、上限で切った末尾の不完全な文字を誤りにしない
+    return new TextDecoder('utf-8', { fatal: true }).decode(buf, { stream: true });
+  } catch {
+    if (platform !== 'win32') return buf.toString('utf8');
+  }
+  try {
+    return new TextDecoder(encoding).decode(buf);
+  } catch {
+    return buf.toString('utf8');
+  }
+}
+
 function killTree(pid: number): void {
   try {
     if (process.platform === 'win32') spawn('taskkill', ['/pid', String(pid), '/T', '/F']);
@@ -53,16 +80,20 @@ export const bashTool: Tool<Input> = {
         shell: unix && existsSync('/bin/bash') ? '/bin/bash' : true,
         detached: unix,
         stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
         env: { ...process.env, CI: process.env.CI ?? '1', GIT_TERMINAL_PROMPT: '0', PAGER: 'cat', GIT_PAGER: 'cat' },
       });
 
-      let output = '';
+      // 文字の途中で区切られても化けないよう、バイト列のまま集めて最後に文字列にする
+      const chunks: Buffer[] = [];
+      let bytes = 0;
       let dropped = 0;
       const onData = (d: Buffer) => {
-        const s = d.toString('utf8');
-        const room = MAX_OUTPUT - output.length;
-        if (room >= s.length) output += s;
-        else { output += s.slice(0, Math.max(0, room)); dropped += s.length - Math.max(0, room); }
+        const room = Math.max(0, MAX_OUTPUT * 4 - bytes);
+        const part = d.length <= room ? d : d.subarray(0, room);
+        if (part.length) chunks.push(part);
+        bytes += part.length;
+        dropped += d.length - part.length;
       };
       child.stdout.on('data', onData);
       child.stderr.on('data', onData);
@@ -76,6 +107,11 @@ export const bashTool: Tool<Input> = {
       const finish = (tail: string, isError: boolean) => {
         clearTimeout(timer);
         ctx.signal.removeEventListener('abort', onAbort);
+        let output = decodeOutput(Buffer.concat(chunks));
+        if (output.length > MAX_OUTPUT) {
+          dropped += output.length - MAX_OUTPUT;
+          output = output.slice(0, MAX_OUTPUT);
+        }
         if (dropped) output += `\n… [output truncated: ${dropped} more characters]`;
         const text = [output.trimEnd(), tail].filter(Boolean).join('\n');
         resolve({ content: text || '(no output)', isError });

@@ -11,7 +11,7 @@ import { compactItem, foldRanges, gradeBlanks, validateRawItem, type RawBlank, t
 import { makeRng, numberLines, sha1, shuffle, splitLines, truncate } from './lib/text';
 import type { McqQuestion, NewName, QuizItem } from './lib/types';
 import type { Asker } from './llm';
-import { BLANKS_SCHEMA, checkItemRefs, distractorRules, leakRules, NEW_NAMES_SCHEMA, REFS_SCHEMA, removeAnswerLeaks } from './quizCommon';
+import { BLANKS_SCHEMA, checkItemRefs, distractorRules, itemSlots, leakRules, NEW_NAMES_SCHEMA, REFS_SCHEMA, removeAnswerLeaks, rewriteReports, type TextSlot } from './quizCommon';
 import type { CommandRecord, Recorder } from './recorder';
 import { buildSteps, condense, reorderByCause, STEP_KIND_LABEL, type Step } from './steps';
 
@@ -135,7 +135,7 @@ interface RawInterview {
   sites?: Array<{ id?: string; reason?: string }>;
 }
 
-const VERDICT_LABEL = { changed: '今回変更した', checked: '読んだが変更していない', unseen: '作業中に一度も読んでいない' } as const;
+const VERDICT_LABEL = { changed: '変更が必要だった', checked: '読んだうえで変更不要とした', unseen: '作業中に一度も読んでいない' } as const;
 
 function describeSteps(steps: Step[]): string {
   const count = steps.reduce((n, s) => n + s.edits.length, 0);
@@ -157,7 +157,8 @@ function interviewPrompt(deps: LessonDeps, steps: Step[], obligations: Obligatio
   );
   return [
     'ここまでの作業は完了しました。これ以上ツールは使わず、変更もしません。',
-    '利用者がこの変更を自分で確かめながら受け入れられるように、あなたが行った変更の理由と判断を整理します。指定のJSONで答えてください。',
+    'この変更は、まだ利用者のファイルには入っていません。これから利用者が、変更の理由と影響を自分で確かめながら、1ステップずつ実装として取り入れていきます。',
+    'そのための手順書として、各変更の理由と判断を整理します。あなたの作業報告ではなく、利用者がこれから行う実装の説明として書いてください。指定のJSONで答えてください。',
     '',
     `【利用者の依頼】\n${deps.request}`,
     '',
@@ -166,18 +167,18 @@ function interviewPrompt(deps: LessonDeps, steps: Step[], obligations: Obligatio
     sites.length > 0 ? `【変更の影響が及びうる場所(システムが検索で集めたもの)】\n${sites.join('\n')}` : '【変更の影響が及びうる場所】\n(なし)',
     '',
     '【書くこと】',
-    '- understanding: 依頼をどう理解したかを1〜2文。',
+    '- understanding: この依頼で何を実現するかを1〜2文(「〜できるようにする」の形)。利用者が実装前に決めたことがあれば、それも含める。',
     '- acceptanceCriteria: 受け入れ条件を1〜5件。「〜のとき〜になる」のように、実装できたかを確かめられる振る舞いで書く。',
     '- steps: 上の各ステップについて1件ずつ(id はそのまま)。',
-    '  - label: そのステップで何をするかの短い見出し(20文字程度。コードは書かない)。',
-    '  - why: なぜその場所を、そう変える必要があったか。ほかのステップの変更に合わせたものなら、どの変更に合わせたかを書く。2〜3文。',
+    '  - label: そのステップで何をするかの短い見出し(20文字程度。「〜する」の形。コードは書かない)。',
+    '  - why: なぜその場所を、そう変える必要があるか。ほかのステップの変更に合わせるものなら、どの変更に合わせるのかを書く。2〜3文。',
     '  - criterion: 主にどの受け入れ条件のための変更か(1始まりの番号。特定の条件に結びつかなければ 0)。',
-    '  - contract: この変更で変わる約束(関数の引数・戻り値・型の項目・メッセージの種類・設定キーなど)を1文。変わらなければ空文字。',
+    '  - contract: この変更によって、ほかのコードから見た使い方がどう変わるか(関数の引数・戻り値・型の項目・メッセージの種類・設定キーなど)を1文。変わらなければ空文字。',
     '- sites: 上の各場所について1件ずつ(id はそのまま)。',
-    '  - 「今回変更した」場所: なぜ変更が必要だったか。',
-    '  - 「読んだが変更していない」場所: なぜ変更が不要と判断したかを、その行のコードを根拠に。',
+    '  - 「変更が必要だった」場所: なぜそこも変える必要があるか。',
+    '  - 「読んだうえで変更不要とした」場所: なぜ変えなくてよいかを、その行のコードを根拠に。',
     '  - 「一度も読んでいない」場所: reason は空文字にする(確かめていないことを推測で書かない)。',
-    '- overall: 変更全体の流れ(どこから始めて、何に波及したか)を、ファイル名を挙げて3〜5文。',
+    '- overall: 変更全体の流れ(どこから始めて、何に波及するか)を、ファイル名を挙げて3〜5文。',
     '',
     `- ${levelStyle(deps.level)}`,
   ].join('\n');
@@ -226,6 +227,7 @@ function quizPrompt(deps: LessonDeps, targets: Step[]): string {
   });
   return [
     'ここまでの作業は完了しました。これ以上ツールは使わず、変更もしません。',
+    'この変更は、これから利用者が1ステップずつ自分で実装として取り入れていきます。',
     '利用者がこの変更の考えどころを自分で考えられるように、ステップごとに、変更後のコードの「考えどころ」を空欄にした選択式の問いを作ります。',
     '変更後のコードは確定済みです。書き換えずに、空欄にする場所だけを指定します。空欄は選択式(正解1つ + 誤答3つ)。指定のJSONで答えてください。',
     '',
@@ -399,15 +401,15 @@ function overallText(lesson: Pick<Lesson, 'goal' | 'steps' | 'obligations'>, sum
   lines.push('手順:');
   for (const { step: s } of lesson.steps) {
     const cause = s.causedBy ? lesson.steps.find((x) => x.step.id === s.causedBy!.step)?.step : undefined;
-    const origin = cause ? `ステップ${cause.number}の変更に合わせる(${s.causedBy!.pattern})` : '依頼を満たすための変更';
+    const origin = cause ? `ステップ${cause.number}の変更に合わせる(${s.causedBy!.pattern})` : '依頼を満たすための起点になる変更';
     lines.push(`${s.number}. ${s.label} — ${[...new Set(s.edits.map((e) => e.path))].join(', ')}(${origin})`);
   }
   const sites = lesson.obligations.flatMap((o) => o.sites);
   if (sites.length > 0) {
     const count = (v: Site['verdict']) => sites.filter((s) => s.verdict === v).length;
     lines.push(
-      `影響の確認: ${lesson.obligations.length}件の変更について${sites.length}か所を調べ、${count('changed')}か所を変更、` +
-        `${count('checked')}か所は読んだうえで変更なし、${count('unseen')}か所は未確認です。`,
+      `影響の確認: ${lesson.obligations.length}件の変更について、影響が及びうる場所は${sites.length}か所。うち${count('changed')}か所は変更が必要、` +
+        `${count('checked')}か所は変更不要、${count('unseen')}か所は未確認。`,
     );
   }
   return lines.join('\n');
@@ -456,6 +458,21 @@ export async function buildLesson(deps: LessonDeps): Promise<Lesson> {
   }
 
   const visible = { goal: interview.understanding?.trim() || deps.request, items: steps.map((s) => items.get(s.id)).filter((i): i is QuizItem => !!i) };
+  const overall = { text: interview.overall?.trim() ?? '' };
+  // 作業を済ませたという報告の形の文章は、利用者がこれから実装する手順としての言い方に直す
+  const slots: TextSlot[] = [
+    { get: () => visible.goal, set: (t) => (visible.goal = t) },
+    { get: () => overall.text, set: (t) => (overall.text = t) },
+    ...criteria.map((_, i) => ({ get: () => criteria[i], set: (t: string) => (criteria[i] = t) })),
+    ...steps.flatMap((s) => [
+      { get: () => s.label, set: (t: string) => (s.label = t) },
+      { get: () => s.why, set: (t: string) => (s.why = t) },
+      { get: () => s.contract, set: (t: string) => (s.contract = t) },
+    ]),
+    ...obligations.flatMap((o) => o.sites.map((p) => ({ get: () => p.reason, set: (t: string) => (p.reason = t) }))),
+    ...visible.items.flatMap(itemSlots),
+  ];
+  await rewriteReports(deps.asker, deps.level, slots, deps.signal);
   if (visible.items.length > 0) {
     status('手がかりの文章を点検しています…');
     await removeAnswerLeaks(deps.asker, deps.level, visible, deps.signal);
@@ -481,7 +498,7 @@ export async function buildLesson(deps: LessonDeps): Promise<Lesson> {
     kind: 'lesson', goal: visible.goal, criteria, overall: '', steps: lessonSteps, obligations,
     changes: deps.changes, unheld: deps.unheld, commands: deps.recorder.commands,
   };
-  lesson.overall = overallText(lesson, interview.overall?.trim() ?? '');
+  lesson.overall = overallText(lesson, overall.text);
   return lesson;
 }
 
@@ -558,6 +575,8 @@ export function blankResults(item: QuizItem, chosen: number[]): Array<Record<str
     correct: grades[k].correct,
     answer: b.answer,
     chosen: picks[k],
+    // 選択肢の中で、このコードになるもの (答え合わせのあとに示す)
+    correctIndex: (b.choices ?? []).findIndex((c) => c.code === b.answer),
     why: b.why ?? '',
     // 自分が選んだ誤答が「なぜ違うか」だけを見せる
     note: grades[k].correct ? '' : (b.choices?.[picks[k]]?.note ?? ''),
