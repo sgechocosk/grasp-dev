@@ -24,6 +24,14 @@ export function renderHtml(o: HtmlOptions): string {
     <button id="keySave">保存</button>
     <button id="settingsClose" class="secondary">閉じる</button>
   </div>
+  <label class="check"><input id="understand" type="checkbox"> 変更の理由と影響を確かめてから反映する</label>
+  <p>オフにすると、手順を示さずにそのまま実装します。</p>
+  <label for="level">経験レベル</label>
+  <select id="level">
+    <option value="beginner">基本(用語を言い換え、基本の仕組みから)</option>
+    <option value="intermediate">実務(設計意図や責務の分担を中心に)</option>
+    <option value="advanced">上級(独自の仕組みやトレードオフを中心に)</option>
+  </select>
 </div>
 <div id="messages"></div>
 <div id="status" hidden><span class="spinner"></span><span id="statusText">作業中…</span></div>
@@ -31,8 +39,7 @@ export function renderHtml(o: HtmlOptions): string {
   <textarea id="input" rows="1" placeholder="質問や実装の指示を入力… (Shift+Enterで改行)"></textarea>
   <div id="toolbar">
     <select id="mode" title="権限モード">
-      <option value="default">編集・実行前に確認</option>
-      <option value="acceptEdits">編集を自動許可</option>
+      <option value="acceptEdits">コマンド実行前に確認</option>
       <option value="bypassPermissions">すべて自動許可</option>
     </select>
     <span id="meta"></span>

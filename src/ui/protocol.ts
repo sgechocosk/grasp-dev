@@ -1,18 +1,44 @@
 import type { PermissionDecision } from '../core/permissions';
 import type { AgentEvent } from '../core/types';
+import type { AskQuestion } from '../understand/askUser';
+import type { ToolCounts } from '../understand/recorder';
+import type { WalkMessage } from '../understand/session';
 
 /** 画面に表示する会話ログの1項目。Webview が再生成されたときの復元に使う (メモリ上のみ)。 */
+export interface ToolItem {
+  kind: 'tool';
+  id: string;
+  name: string;
+  input: unknown;
+  summary: string;
+  output?: string;
+  isError?: boolean;
+  done: boolean;
+}
+
 export type TranscriptItem =
   | { kind: 'user'; text: string }
   | { kind: 'assistant'; text: string }
-  | { kind: 'tool'; id: string; name: string; input: unknown; summary: string; output?: string; isError?: boolean; done: boolean }
-  | { kind: 'info' | 'error'; text: string };
+  | ToolItem
+  | { kind: 'info' | 'error'; text: string }
+  /** 実装の前に利用者へ尋ねたこと (answers があれば回答済み) */
+  | { kind: 'ask'; id: string; questions: AskQuestion[]; answers?: string[] }
+  /** たどる手順の1コマ */
+  | { kind: 'walk'; message: WalkMessage }
+  /** 手順をたどり終えてから開示する、作業の記録 */
+  | { kind: 'record'; items: TranscriptItem[] };
 
 export interface ViewState {
   hasKey: boolean;
   busy: boolean;
   permissionMode: string;
   hasWorkspace: boolean;
+  /** 変更を取り置いて、たどり終えてから反映するか */
+  understand: boolean;
+  /** 利用者の経験レベル (beginner / intermediate / advanced) */
+  level: string;
+  /** 取り置いている変更があるか */
+  holding: boolean;
 }
 
 export type HostMessage =
@@ -21,6 +47,14 @@ export type HostMessage =
   | { type: 'toggle_settings' }
   | { type: 'user'; text: string }
   | { type: 'event'; event: AgentEvent }
+  | { type: 'walk'; message: WalkMessage }
+  | { type: 'record'; items: TranscriptItem[] }
+  | { type: 'progress'; counts: ToolCounts }
+  | { type: 'ask'; id: string; questions: AskQuestion[] }
+  | { type: 'ask_cancel'; id: string }
+  /** 失敗したコマンドの出力 (変更内容を含みうるので、利用者が開いたときだけ見せる) */
+  | { type: 'tool_failure'; id: string; output: string }
+  | { type: 'status'; text: string }
   | { type: 'permission_request'; toolCallId: string; key: string }
   | { type: 'permission_cancel'; toolCallId: string };
 
@@ -30,5 +64,12 @@ export type WebviewMessage =
   | { type: 'stop' }
   | { type: 'setApiKey'; key: string }
   | { type: 'setMode'; mode: string }
-  | { type: 'openFile'; path: string }
+  | { type: 'setUnderstand'; on: boolean }
+  | { type: 'setLevel'; level: string }
+  | { type: 'openFile'; path: string; line?: number }
+  | { type: 'walk_answer'; index: number; blanks: number[]; next: number[] }
+  | { type: 'walk_next' }
+  | { type: 'ask_response'; id: string; answers: string[] }
+  | { type: 'walk_apply' }
+  | { type: 'walk_discard' }
   | { type: 'permission_response'; toolCallId: string; decision: PermissionDecision };

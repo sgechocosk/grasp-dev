@@ -12,8 +12,12 @@ export const CONFIG = {
   baseUrl: 'https://api.openai.com/v1',
   /** 推論モデルの reasoning effort。空ならモデルの既定値 */
   reasoningEffort: '',
-  /** 権限モードの初期値 (入力欄下のセレクタで変更可)。default: 編集・コマンド実行の前に毎回確認する */
-  permissionMode: 'default' as PermissionMode,
+  /** 権限モードの初期値 (入力欄下のセレクタで変更可)。acceptEdits: コマンド実行の前だけ確認する (ワークスペース内の編集は常に確認なし) */
+  permissionMode: 'acceptEdits' as PermissionMode,
+  /** 変更を取り置いて、利用者が手順をたどり終えてから反映するか (設定パネルで変更可) */
+  understand: true,
+  /** 利用者の経験レベルの初期値: beginner / intermediate / advanced (設定パネルで変更可) */
+  level: 'intermediate',
   /** 1回の指示でモデルを呼び出す最大回数 */
   maxTurns: 100,
   /** 入力トークンがこの値を超えたら会話履歴を自動要約する (0で無効) */

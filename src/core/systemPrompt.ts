@@ -39,13 +39,20 @@ export interface SystemPromptOptions {
   customInstructions?: string;
 }
 
+/** Windows では Bash ツールが cmd.exe で動くので、書き方を合わせさせる (ほかの環境では何も足さない) */
+export function shellNote(platform: string): string {
+  if (platform !== 'win32') return '';
+  return `
+- Shell used by the Bash tool: cmd.exe (not bash). Write commands in Windows syntax: run scripts as \`.\\mvnw.cmd test\` or \`gradlew.bat build\` (not \`./mvnw\`), chain with \`&&\`, and do not rely on POSIX tools such as ls, cat, grep, sed or export. If a build tool reports that Java, Node or another runtime cannot be found, report that exact message to the user instead of retrying the same command.`;
+}
+
 export async function buildSystemPrompt(opts: SystemPromptOptions): Promise<string> {
   const parts = [BASE_PROMPT];
 
   parts.push(`# Environment
 - Workspace root (working directory): ${opts.cwd}
 - Is a git repository: ${existsSync(path.join(opts.cwd, '.git')) ? 'yes' : 'no'}
-- Platform: ${process.platform} (${os.release()})
+- Platform: ${process.platform} (${os.release()})${shellNote(process.platform)}
 - Today's date: ${new Date().toISOString().slice(0, 10)}
 - Model: ${opts.model}`);
 
