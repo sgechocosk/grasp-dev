@@ -5,6 +5,8 @@ import { resolvePath } from '../tools/tool';
 /** 実行したコマンドと結果 (検証の根拠として最後に見せる) */
 export interface CommandRecord {
   command: string;
+  /** 何のためのコマンドか (モデルが添えた短い説明。無ければ空) */
+  description: string;
   ok: boolean;
   /** 出力の末尾 */
   output: string;
@@ -93,7 +95,7 @@ export class Recorder {
         break;
       case 'Bash':
         this.counts.command++;
-        this.commands.push({ command: String(input.command ?? ''), ok: !isError, output: output.slice(-OUTPUT_TAIL) });
+        this.commands.push({ command: String(input.command ?? ''), description: String(input.description ?? '').trim(), ok: !isError, output: output.slice(-OUTPUT_TAIL) });
         break;
     }
   }

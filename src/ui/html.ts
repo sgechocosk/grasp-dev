@@ -10,7 +10,7 @@ export function renderHtml(o: HtmlOptions): string {
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${o.cspSource}; script-src 'nonce-${o.nonce}';">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${o.cspSource}; img-src data:; script-src 'nonce-${o.nonce}';">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <link href="${o.styleUri}" rel="stylesheet">
 <title>GraspDev</title>
@@ -24,17 +24,18 @@ export function renderHtml(o: HtmlOptions): string {
     <button id="keySave">保存</button>
     <button id="settingsClose" class="secondary">閉じる</button>
   </div>
-  <label class="check"><input id="understand" type="checkbox"> 変更の理由と影響を確かめてから反映する</label>
-  <p>オフにすると、手順を示さずにそのまま実装します。</p>
   <label for="level">経験レベル</label>
   <select id="level">
     <option value="beginner">基本(用語を言い換え、基本の仕組みから)</option>
     <option value="intermediate">実務(設計意図や責務の分担を中心に)</option>
     <option value="advanced">上級(独自の仕組みやトレードオフを中心に)</option>
   </select>
+  <label class="check"><input id="testMode" type="checkbox"> テストモード</label>
+  <p>API を呼ぶたびに、目的・モデル・想定トークン数を確認します。入力欄の下に、会話全体を画像で保存するボタンが出ます。</p>
 </div>
 <div id="messages"></div>
 <div id="status" hidden><span class="spinner"></span><span id="statusText">作業中…</span></div>
+<div id="permission" hidden></div>
 <div id="composer">
   <textarea id="input" rows="1" placeholder="質問や実装の指示を入力… (Shift+Enterで改行)"></textarea>
   <div id="toolbar">
@@ -43,6 +44,7 @@ export function renderHtml(o: HtmlOptions): string {
       <option value="bypassPermissions">すべて自動許可</option>
     </select>
     <span id="meta"></span>
+    <button id="capture" class="secondary" title="会話全体を画像として保存します" hidden>画面を保存</button>
     <button id="send">送信</button>
   </div>
 </div>

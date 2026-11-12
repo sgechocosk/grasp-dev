@@ -5,7 +5,7 @@ import { compactItem, validateRawItem, type RawBlank, type RawItem, type RawRef 
 import type { QuizItem } from './lib/types';
 import { blankResults, itemPayload, refReader, toRel, type StepAnswer } from './lesson';
 import type { Asker } from './llm';
-import { BLANKS_SCHEMA, checkItemRefs, distractorRules, itemSlots, leakRules, REFS_SCHEMA, removeAnswerLeaks, rewriteReports } from './quizCommon';
+import { BLANKS_SCHEMA, checkItemRefs, distractorRules, itemSlots, leakRules, quizLeakTargets, REFS_SCHEMA, removeAnswerLeaks, rewriteReports } from './quizCommon';
 import type { Recorder } from './recorder';
 
 /**
@@ -113,7 +113,7 @@ export async function buildReading(deps: ReadingDeps): Promise<Reading | undefin
     .filter((x) => x.rel)
     .map((x) => `- ${x.rel}: ${x.r.map(([s, e]) => `L${s}-${e}`).join(', ')}`);
   if (ranges.length === 0 || !deps.recorder.finalText.trim()) return undefined;
-  deps.onStatus?.('読んだコードから、確かめどころを整理しています…');
+  deps.onStatus?.('回答の根拠になるコードを整理しています…');
 
   const items: QuizItem[] = [];
   let goal = '';
@@ -164,7 +164,7 @@ export async function buildReading(deps: ReadingDeps): Promise<Reading | undefin
   if (items.length === 0) return undefined;
   const quiz = { goal: goal || deps.request, items };
   await rewriteReports(deps.asker, deps.level, [{ get: () => quiz.goal, set: (t) => (quiz.goal = t) }, ...items.flatMap(itemSlots)], deps.signal);
-  await removeAnswerLeaks(deps.asker, deps.level, quiz, deps.signal);
+  await removeAnswerLeaks(deps.asker, deps.level, quizLeakTargets(quiz), deps.signal);
   return { kind: 'reading', goal: quiz.goal, items, answer: deps.recorder.finalText };
 }
 

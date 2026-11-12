@@ -44,29 +44,11 @@ pre code { background: none; padding: 0; }
 .note { font-size: 0.92em; opacity: 0.8; white-space: pre-wrap; overflow-wrap: anywhere; }
 .note.error { opacity: 1; color: var(--vscode-errorForeground); }
 
-.tool {
-  border: 1px solid var(--vscode-widget-border, rgba(128,128,128,.35));
-  border-radius: 6px; font-size: 0.95em;
-}
-.tool summary { cursor: pointer; padding: 4px 8px; display: flex; align-items: center; gap: 6px; list-style: none; min-width: 0; }
-.tool summary::-webkit-details-marker { display: none; }
-.tool .dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--vscode-progressBar-background); animation: pulse 1.2s ease-in-out infinite; }
-.tool.ok .dot { background: var(--vscode-testing-iconPassed, #3fb950); animation: none; }
-.tool.error .dot { background: var(--vscode-errorForeground); animation: none; }
-.tool .tname { flex: none; font-weight: 600; }
-.tool .tsum { opacity: 0.8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--vscode-editor-font-family, monospace); font-size: 0.95em; }
-.tool .tsum.link:hover { text-decoration: underline; color: var(--vscode-textLink-foreground); }
-.tool .tbody { padding: 0 8px; }
-.tool .tbody > * { margin: 0 0 8px; }
-.tool pre { max-height: 260px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
 .diff { font-family: var(--vscode-editor-font-family, monospace); font-size: var(--vscode-editor-font-size, 0.95em); max-height: 300px; overflow: auto; border-radius: 4px; }
 .diff div { white-space: pre-wrap; overflow-wrap: anywhere; padding: 0 6px; }
 .diff .del { background: var(--vscode-diffEditor-removedTextBackground, rgba(255,0,0,.2)); }
 .diff .add { background: var(--vscode-diffEditor-insertedTextBackground, rgba(0,255,0,.15)); }
-.todo.completed { opacity: 0.6; text-decoration: line-through; }
-.todo.in_progress { font-weight: 600; }
 
-.perm { padding: 8px; border-top: 1px solid var(--vscode-widget-border, rgba(128,128,128,.35)); display: flex; flex-direction: column; gap: 6px; }
 .ptext { font-weight: 600; }
 
 button {
@@ -113,7 +95,8 @@ select {
   border: 1px solid var(--vscode-widget-border, rgba(128,128,128,.35)); border-radius: 6px;
   padding: 10px; display: flex; flex-direction: column; gap: 8px; scroll-margin-top: 8px;
 }
-.wstart, .wfinal { border-left: 3px solid var(--vscode-focusBorder); }
+.wstart, .wfinal, .ask { background: var(--vscode-textCodeBlock-background); }
+.wstart .wlabel, .wfinal > .wlabel, .ask > .wlabel { padding-bottom: 6px; border-bottom: 1px solid var(--vscode-widget-border, rgba(128,128,128,.35)); }
 .whead { display: flex; align-items: center; gap: 8px; font-size: 0.9em; opacity: 0.85; }
 .wnum { font-weight: 600; }
 .tag { font-size: 0.85em; padding: 0 6px; border-radius: 8px; background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); white-space: nowrap; }
@@ -122,11 +105,11 @@ select {
 .wsec h4 { margin: 0; font-size: 0.9em; font-weight: 600; opacity: 0.75; }
 .wtext { white-space: pre-wrap; overflow-wrap: anywhere; }
 .wtext.small, .wtext.hint, .wtext.ref, .wtext.names { font-size: 0.92em; opacity: 0.85; }
-.wtext.hint { padding-left: 8px; border-left: 2px solid var(--vscode-textBlockQuote-border, rgba(128,128,128,.5)); }
+.wtext.hint { padding: 4px 8px; border-radius: 4px; background: var(--vscode-textCodeBlock-background); }
 .wtext.attn, .qres.attn { color: var(--vscode-editorWarning-foreground, #cca700); }
 .qres.ok, .cmdrow.ok { color: var(--vscode-testing-iconPassed, #3fb950); }
 .qres .wtext { color: var(--vscode-foreground); }
-.qres.attn { padding-left: 8px; border-left: 2px solid var(--vscode-editorWarning-foreground, #cca700); }
+.qres.attn { padding: 6px 8px; border-radius: 4px; background: rgba(204, 167, 0, .12); }
 .flink { color: var(--vscode-textLink-foreground); cursor: pointer; font-family: var(--vscode-editor-font-family, monospace); font-size: 0.95em; overflow-wrap: anywhere; }
 .flink:hover { text-decoration: underline; }
 .wfiles { display: flex; flex-wrap: wrap; gap: 4px 12px; }
@@ -189,18 +172,14 @@ button.opt.sel:disabled, button.opt.ok:disabled, button.opt.attn:disabled { opac
 .site .wtext { flex-basis: 100%; }
 .badge { font-size: 0.85em; padding: 0 6px; border-radius: 8px; border: 1px solid var(--vscode-widget-border, rgba(128,128,128,.45)); white-space: nowrap; }
 .site.changed .badge { border-color: var(--vscode-testing-iconPassed, #3fb950); }
-.site.unseen .badge { border-color: var(--vscode-editorWarning-foreground, #cca700); color: var(--vscode-editorWarning-foreground, #cca700); }
 .frow { display: flex; gap: 8px; align-items: baseline; }
 .frow .stat { margin-left: auto; font-size: 0.9em; white-space: nowrap; }
 .plus { color: var(--vscode-testing-iconPassed, #3fb950); }
 .minus { color: var(--vscode-errorForeground); }
-.fdiff summary, .record summary { cursor: pointer; font-size: 0.92em; opacity: 0.8; }
-.record .rbody { display: flex; flex-direction: column; gap: 8px; margin-top: 6px; }
-.walk.closed .wstep { opacity: 0.85; }
+.fdiff summary { cursor: pointer; font-size: 0.92em; opacity: 0.8; }
 .panel label.check { display: flex; align-items: center; gap: 6px; }
 
 /* ---------- 実装の前に決めること ---------- */
-.ask { border-left: 3px solid var(--vscode-editorWarning-foreground, #cca700); }
 .wtext.qtitle { font-weight: 600; }
 button.opt.choice { display: flex; flex-direction: column; gap: 2px; font-family: inherit; }
 .olabel { display: flex; align-items: center; gap: 6px; font-weight: 600; }
@@ -213,4 +192,31 @@ input.other {
 .names { display: flex; flex-direction: column; gap: 2px; }
 .nrow { display: flex; gap: 8px; align-items: baseline; font-size: 0.95em; }
 .nrow span { opacity: 0.85; }
-.tfail summary { cursor: pointer; font-size: 0.92em; color: var(--vscode-editorWarning-foreground, #cca700); }
+
+/* ---------- 許可の確認 (入力欄の上) ---------- */
+#permission {
+  margin: 0 12px 6px; padding: 8px 10px; border-radius: 6px; display: flex; flex-direction: column; gap: 6px;
+  border: 1px solid var(--vscode-widget-border, rgba(128,128,128,.35)); background: var(--vscode-textCodeBlock-background);
+}
+#permission .ptext { font-weight: 600; }
+#permission .pdetail { margin: 0; max-height: 120px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--vscode-input-background); }
+#permission .prow { display: flex; gap: 6px; flex-wrap: wrap; }
+
+/* ---------- 影響の確認・変更の全体像 ---------- */
+.chead { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.others summary { cursor: pointer; font-size: 0.92em; opacity: 0.75; }
+.others .site { padding: 2px 0 0 12px; }
+.crow, .srow, .cmdrow { display: flex; gap: 8px; align-items: baseline; }
+.crow .tag, .srow .tag { margin-left: auto; flex: none; }
+.crow .mno, .srow .mno { opacity: 0.7; flex: none; min-width: 1.4em; }
+.srow { padding: 4px 0; border-top: 1px solid var(--vscode-widget-border, rgba(128,128,128,.2)); }
+.srow:first-of-type { border-top: none; }
+.sbody { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.wtext.stitle { font-weight: 600; }
+.smeta { display: flex; flex-wrap: wrap; gap: 2px 10px; align-items: center; }
+.smeta .tag { margin-left: 0; }
+.badge.ok { border-color: var(--vscode-testing-iconPassed, #3fb950); color: var(--vscode-testing-iconPassed, #3fb950); }
+.badge.ng { border-color: var(--vscode-errorForeground); color: var(--vscode-errorForeground); }
+.cmdrow .badge { flex: none; }
+.cmdrow code { overflow-wrap: anywhere; }
+#capture { font-size: 0.92em; padding: 2px 8px; }

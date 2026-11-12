@@ -9,17 +9,18 @@ import type { AssistantMessage, ToolCall } from '../src/core/types';
 import type { CompletionRequest } from '../src/providers/provider';
 import { ProviderRegistry } from '../src/providers/provider';
 import { createDefaultToolRegistry } from '../src/tools';
-import { ChatViewProvider } from '../src/ui/chatViewProvider';
+import { ChatViewProvider, describeActivity } from '../src/ui/chatViewProvider';
 import type { HostMessage, WebviewMessage } from '../src/ui/protocol';
-import { state as vscodeState } from './stubs/vscode';
+import { answers as dialogAnswers, dialogs, output, state as vscodeState } from './stubs/vscode';
 
 const call = (id: string, name: string, args: unknown): ToolCall => ({ id, name, arguments: JSON.stringify(args) });
 const reply = (content: string, toolCalls: ToolCall[] = []): AssistantMessage => ({ role: 'assistant', content, toolCalls });
 
 const ORIGINAL = 'export function double(n: number): number {\n  return n * 2;\n}\n';
+const EMPTY = { understanding: '', acceptanceCriteria: [], overall: '', verification: '', steps: [], sites: [], items: [], fixes: [] };
 
 /** 画面のホストを、台本どおりに応答するプロバイダと、テスト用の画面で動かす */
-function harness(settings: Record<string, unknown>, json: (name: string) => unknown = () => ({}), ask = false) {
+function harness(settings: Record<string, unknown> = {}, opts: { ask?: boolean; question?: boolean } = {}) {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'grasp-host-'));
   fs.writeFileSync(path.join(cwd, 'calc.ts'), ORIGINAL);
   const git = (...args: string[]) => execFileSync('git', args, { cwd, stdio: 'pipe' });
@@ -27,34 +28,41 @@ function harness(settings: Record<string, unknown>, json: (name: string) => unkn
   git('add', '-A');
   git('-c', 'user.email=t@example.com', '-c', 'user.name=t', 'commit', '-q', '-m', 'init');
   vscodeState.folder = cwd;
+  output.length = 0;
+  dialogs.length = 0;
+  dialogAnswers.length = 0;
 
   const file = path.join(cwd, 'calc.ts');
-  const script = [
-    reply('読みます', [call('r1', 'Read', { file_path: file })]),
-    ...(ask
-      ? [reply('', [call('q1', 'AskUser', { questions: [{ question: 'どう計算しますか', why: '書き方が複数ある', options: [{ label: '加算', detail: 'n + n' }, { label: 'シフト', detail: 'n << 1' }] }] })])]
-      : []),
-    reply('直します', [call('e1', 'Edit', { file_path: file, old_string: 'n * 2', new_string: 'n + n' })]),
-    reply('', [call('b1', 'Bash', { command: 'echo secret-output && exit 2' })]),
-    reply('足し算に変えました。'),
-  ];
+  const script = opts.question
+    ? [reply('こんにちは。')]
+    : [
+        reply('読みます', [call('r1', 'Read', { file_path: file })]),
+        ...(opts.ask
+          ? [reply('', [call('q1', 'AskUser', { questions: [{ question: 'どう計算しますか', why: '書き方が複数ある', options: [{ label: '加算', detail: 'n + n' }, { label: 'シフト', detail: 'n << 1' }] }] })])]
+          : []),
+        reply('直します', [call('e1', 'Edit', { file_path: file, old_string: 'n * 2', new_string: 'n + n' })]),
+        reply('', [call('b1', 'Bash', { command: 'echo secret-output && exit 2' })]),
+        reply('足し算に変えました。'),
+      ];
   let i = 0;
   const seen: CompletionRequest[] = [];
   const providers = new ProviderRegistry();
   providers.register(CONFIG.provider, () => ({
     id: 'scripted',
     async complete(req, onEvent) {
-      if (req.jsonSchema) return { message: reply(JSON.stringify(json(req.jsonSchema.name))) };
+      if (req.jsonSchema) return { message: reply(JSON.stringify(EMPTY)), usage: { inputTokens: 1200, outputTokens: 30, cachedTokens: 1024 } };
       seen.push({ ...req, messages: [...req.messages] });
       const message = script[i++];
       if (message.content) onEvent({ type: 'text', delta: message.content });
-      return { message };
+      return { message, usage: { inputTokens: 3310, outputTokens: 48, cachedTokens: 2816 } };
     },
   }));
 
   const store = new Map<string, unknown>(Object.entries(settings));
+  const storage = fs.mkdtempSync(path.join(os.tmpdir(), 'grasp-storage-'));
   const context: any = {
-    extensionUri: { fsPath: '/ext' },
+    extensionUri: { fsPath: process.cwd() },
+    globalStorageUri: { fsPath: storage },
     subscriptions: [],
     secrets: { get: async () => 'key', store: async () => undefined, onDidChange: () => ({ dispose() {} }) },
     globalState: { get: (k: string, d: unknown) => (store.has(k) ? store.get(k) : d), update: async (k: string, v: unknown) => void store.set(k, v) },
@@ -79,50 +87,102 @@ function harness(settings: Record<string, unknown>, json: (name: string) => unkn
     show: () => undefined,
   } as any);
   const send = (m: WebviewMessage) => (host as any).onMessage(m) as Promise<void>;
-  return { cwd, file, posted, send, seen };
+  return { cwd, file, posted, send, seen, storage };
 }
 
-const events = (posted: HostMessage[]) => posted.flatMap((m) => (m.type === 'event' ? [m.event] : []));
+const activities = (posted: HostMessage[]) => posted.flatMap((m) => (m.type === 'activity' && m.text ? [m.text] : []));
 
-test('理解モード: 実行中は作業の中身を出さず、たどり終えてから反映し、記録と報告を開示する', async () => {
-  const h = harness({}, (name) => (name === 'change_interview' ? { understanding: '足し算にする', acceptanceCriteria: [], overall: '', steps: [], sites: [] } : { items: [], fixes: [] }));
+test('実行中: コマンドや編集は会話に出さず、作業の内容を入力欄の上に1行で示す', async () => {
+  const h = harness();
   await h.send({ type: 'send', text: '足し算にして' });
 
-  // 編集に許可は求めない。コマンドは実行前に確認する
-  assert.deepEqual(h.posted.filter((m) => m.type === 'permission_request').map((m: any) => m.toolCallId), ['b1']);
-  // 実行中に画面へ出るのは、コマンドのカード (出力なし) と進み具合だけ
-  const live = events(h.posted);
-  assert.deepEqual(live.filter((e) => e.type === 'tool_start').map((e: any) => e.name), ['Bash']);
-  assert.deepEqual(live.filter((e) => e.type === 'tool_end').map((e: any) => e.output), ['']);
-  assert.ok(!live.some((e) => e.type === 'text_delta' || e.type === 'assistant_end'));
+  // 会話に届くのは、利用者の文と手順だけ (ツールの呼び出し・途中の文章・実装の報告は届かない)
+  assert.deepEqual([...new Set(h.posted.map((m) => m.type))].sort(), ['activity', 'event', 'permission_request', 'state', 'user', 'walk']);
+  assert.deepEqual([...new Set(h.posted.flatMap((m) => (m.type === 'event' ? [m.event.type] : [])))], ['usage']);
   assert.ok(!JSON.stringify(h.posted.filter((m) => m.type !== 'walk')).includes('n + n'));
-  assert.deepEqual((h.posted.filter((m) => m.type === 'progress').pop() as any).counts, { read: 1, search: 0, edit: 1, command: 1 });
+  // コマンドの出力は届かない (コマンドの文と、失敗したことだけを伝える)
+  assert.ok(!JSON.stringify(h.posted).includes('secret-output\\n'));
+  assert.ok(!JSON.stringify(h.posted).includes('足し算に変えました'));
 
-  // 変更は取り置かれ、ファイルは変更前のまま
+  // 作業の内容は1行の文で伝える。編集は、どこを変えたかを書かない
+  assert.deepEqual(activities(h.posted), [
+    '次の作業を考えています…',
+    'ファイルを読んでいます: calc.ts',
+    '次の作業を考えています…',
+    'コードを書き換えています',
+    '次の作業を考えています…',
+    'コマンドを実行しています: echo secret-output && exit 2',
+    'コマンドが失敗しました: echo secret-output && exit 2(Exit code: 2)',
+    '次の作業を考えています…',
+    '変更内容をまとめています…',
+    '変更の手順を組み立てています…',
+  ]);
+
+  // 編集に許可は求めない。コマンドは、入力欄の上で確認する
+  const perms = h.posted.filter((m) => m.type === 'permission_request') as any[];
+  assert.deepEqual(perms.map((m) => [m.toolCallId, m.title, m.detail]), [['b1', 'このコマンドを実行しますか?', 'echo secret-output && exit 2']]);
+
+  // 変更は取り置かれ、たどり終えてから反映する
   assert.equal(fs.readFileSync(h.file, 'utf8'), ORIGINAL);
-  const walk = h.posted.flatMap((m) => (m.type === 'walk' ? [m.message] : []));
-  assert.deepEqual(walk.map((m) => m.type), ['walk_start', 'walk_step', 'walk_reveal']);
-  assert.equal((h.posted.filter((m) => m.type === 'state').pop() as any).state.holding, true);
-
-  await h.send({ type: 'walk_apply' }); // たどり終える前は反映しない
+  await h.send({ type: 'walk_apply' });
   assert.equal(fs.readFileSync(h.file, 'utf8'), ORIGINAL);
   await h.send({ type: 'walk_next' });
   await h.send({ type: 'walk_apply' });
   assert.match(fs.readFileSync(h.file, 'utf8'), /n \+ n/);
-
-  // 反映のあとに、控えていた作業の記録と報告が出る
-  const record = h.posted.find((m) => m.type === 'record') as any;
-  // 実装の報告 (「〜しました」) は、手順のあとに並べず、記録の中に入れる
-  assert.deepEqual(record.items.map((t: any) => t.name ?? t.kind), ['assistant', 'Read', 'assistant', 'Edit', 'Bash', 'assistant']);
-  assert.match(record.items[4].output, /secret-output/);
-  assert.ok(!events(h.posted).some((e) => e.type === 'assistant_end'));
-  // 失敗したコマンドは、出力を開いて原因を確かめられる
-  assert.deepEqual(h.posted.filter((m) => m.type === 'tool_failure').map((m: any) => m.output), ['secret-output\nExit code: 2']);
-  assert.equal((h.posted.filter((m) => m.type === 'state').pop() as any).state.holding, false);
 });
 
-test('理解モード: 受け入れ条件が一つに決まらないときは、実装の前に利用者へ尋ねる', async () => {
-  const h = harness({}, () => ({ understanding: '', acceptanceCriteria: [], overall: '', steps: [], sites: [], items: [], fixes: [] }), true);
+test('出力パネル: API を呼ぶたびに、モデル・入出力トークン数・キャッシュを1行で記録する', async () => {
+  const h = harness();
+  await h.send({ type: 'send', text: '足し算にして' });
+  const lines = output.map((l) => l.replace(/^\S+( [AP]M)? /, ''));
+  assert.equal(lines.filter((l) => l === `${CONFIG.model} 入力3,310(キャッシュ2,816) 出力48`).length, 4);
+  assert.ok(lines.includes(`${CONFIG.model} 入力1,200(キャッシュ1,024) 出力30`));
+  // 送った内容やツールの呼び出しは記録しない (テストモードでなければ)
+  assert.ok(lines.every((l) => l.startsWith(CONFIG.model)));
+  assert.equal(dialogs.length, 0);
+});
+
+test('テストモード: API を呼ぶ前に目的・モデル・想定トークン数を確認し、処理の中の確認を省ける', async () => {
+  const h = harness({ 'graspDev.testMode': true });
+  dialogAnswers.push('実行', 'この処理では以降確認しない');
+  await h.send({ type: 'send', text: '足し算にして' });
+  // 1回目と2回目だけ確認し、以降はこの処理が終わるまで確認しない
+  assert.deepEqual(dialogs.map((d) => d.message), ['API を呼び出します: 調査と実装(1回目の応答)', 'API を呼び出します: 調査と実装(2回目の応答)']);
+  assert.match(dialogs[0].detail!, new RegExp(`^モデル: ${CONFIG.model}\\n想定入力トークン数: 約[\\d,]+$`));
+  assert.deepEqual(dialogs[0].items, ['実行', 'この処理では以降確認しない']);
+  assert.ok(h.posted.some((m) => m.type === 'walk'));
+  // テストモードでは、会話に出さないツールの呼び出しを出力パネルに残す
+  assert.ok(output.some((l) => /ツール Bash .*echo secret-output.* → 失敗\nsecret-output/.test(l)));
+
+  // 次の処理では、また確認する。取り消すと API を呼ばずに止まる
+  dialogs.length = 0;
+  const before = h.seen.length;
+  await h.send({ type: 'send', text: 'もう一度' });
+  assert.equal(dialogs.length, 1);
+  assert.equal(h.seen.length, before);
+  assert.ok(h.posted.some((m) => m.type === 'event' && m.event.type === 'error' && /取り消しました/.test(m.event.message)));
+});
+
+test('テストモード: 会話全体の画像をファイルに保存する', async () => {
+  const h = harness({ 'graspDev.testMode': true });
+  await h.send({ type: 'capture_request' });
+  const capture = h.posted.find((m) => m.type === 'capture') as any;
+  assert.match(capture.css, /#messages/);
+  const png = Buffer.from('89504e470d0a1a0a', 'hex');
+  await h.send({ type: 'capture_result', dataUrl: `data:image/png;base64,${png.toString('base64')}` });
+  const files = fs.readdirSync(path.join(h.storage, 'screenshots'));
+  assert.match(files[0], /^chat-\d{8}-\d{6}\.png$/);
+  assert.deepEqual(fs.readFileSync(path.join(h.storage, 'screenshots', files[0])), png);
+  assert.match(dialogs[dialogs.length - 1].message, /画面を保存しました/);
+
+  // テストモードでなければ、保存しない
+  const off = harness();
+  await off.send({ type: 'capture_request' });
+  assert.ok(!off.posted.some((m) => m.type === 'capture'));
+});
+
+test('受け入れ条件が一つに決まらないときは、実装の前に利用者へ尋ねる', async () => {
+  const h = harness({}, { ask: true });
   await h.send({ type: 'send', text: '2倍の計算を直して' });
   // 尋ねる道具と指示が加わり、質問は編集の前に画面へ出る
   assert.ok(h.seen[0].tools.some((t) => t.name === 'AskUser'));
@@ -136,21 +196,20 @@ test('理解モード: 受け入れ条件が一つに決まらないときは、
   assert.ok(h.posted.some((m) => m.type === 'walk' && m.message.type === 'walk_start'));
 });
 
-test('理解モードをオフにすると、従来どおりすぐファイルに書き、作業をそのまま表示する', async () => {
-  const h = harness({ 'graspDev.understand': false });
-  await h.send({ type: 'send', text: '足し算にして' });
-  assert.match(fs.readFileSync(h.file, 'utf8'), /n \+ n/);
-  const live = events(h.posted);
-  assert.deepEqual(live.filter((e) => e.type === 'tool_start').map((e: any) => e.name), ['Read', 'Edit', 'Bash']);
-  assert.ok(live.some((e) => e.type === 'assistant_end' && e.text === '足し算に変えました。'));
-  assert.ok(!h.posted.some((m) => m.type === 'walk' || m.type === 'record'));
-  assert.ok(!h.seen[0].tools.some((t) => t.name === 'AskUser'));
-  assert.ok(!/Decisions that belong to the user/.test(h.seen[0].system));
-  assert.deepEqual(h.posted.filter((m) => m.type === 'permission_request').map((m: any) => m.toolCallId), ['b1']);
+test('変更も読んだコードも無い応答は、そのまま会話に出す', async () => {
+  const h = harness({}, { question: true });
+  await h.send({ type: 'send', text: 'こんにちは' });
+  const texts = h.posted.flatMap((m) => (m.type === 'event' && m.event.type === 'assistant_end' ? [m.event.text] : []));
+  assert.deepEqual(texts, ['こんにちは。']);
+  assert.ok(!h.posted.some((m) => m.type === 'walk'));
 });
 
-test('以前の設定「編集・実行前に確認」は、コマンド実行前の確認として扱う', async () => {
-  const h = harness({ 'graspDev.permissionMode': 'default', 'graspDev.understand': false });
+test('以前の設定「編集・実行前に確認」は、コマンド実行前の確認として扱う。作業の表示は道具ごとに決まっている', async () => {
+  const h = harness({ 'graspDev.permissionMode': 'default' });
   await h.send({ type: 'ready' });
   assert.equal((h.posted[0] as any).state.permissionMode, 'acceptEdits');
+  assert.equal((h.posted[0] as any).state.testMode, false);
+  assert.equal(describeActivity('Grep', { pattern: 'calcPrice\\(' }, '/w'), 'コードを検索しています: calcPrice\\(');
+  assert.equal(describeActivity('Write', { file_path: '/w/a.ts' }, '/w'), 'コードを書き換えています');
+  assert.equal(describeActivity('TodoWrite', {}, '/w'), '作業の段取りを整理しています');
 });
