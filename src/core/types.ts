@@ -34,6 +34,8 @@ export type Message = UserMessage | AssistantMessage | ToolMessage;
 export interface Usage {
   inputTokens: number;
   outputTokens: number;
+  /** 入力のうち、プロンプトキャッシュに当たったトークン数 (API が返した場合) */
+  cachedTokens?: number;
 }
 
 export type JSONSchema = Record<string, unknown>;
