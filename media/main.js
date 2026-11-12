@@ -46,8 +46,9 @@
         out.push(`<pre><code>${esc(code.join('\n'))}</code></pre>`);
       } else if (!line.trim()) {
         i++;
-      } else if (/^#{1,6}\s/.test(line)) {
-        const m = line.match(/^(#{1,6})\s+(.*)$/);
+      } else if (/^\s*#{1,6}\s/.test(line)) {
+        // 箇条書きの中などで字下げされた見出しも、見出しとして扱う
+        const m = line.match(/^\s*(#{1,6})\s+(.*)$/);
         out.push(`<h${m[1].length}>${inline(m[2])}</h${m[1].length}>`);
         i++;
       } else if (line.includes('|') && isTableSep(lines[i + 1])) {
@@ -72,7 +73,8 @@
         while (i < lines.length && /^\s*>/.test(lines[i])) quote.push(lines[i++].replace(/^\s*>\s?/, ''));
         out.push(`<blockquote>${quote.map(inline).join('<br>')}</blockquote>`);
       } else {
-        const para = [];
+        // 最初の行は必ず取り込む (どの種類にも当てはまらなかった行で止まったままになると、描画が終わらず画面が固まる)
+        const para = [lines[i++]];
         while (i < lines.length && lines[i].trim() && !isBlockStart(lines[i]) && !(lines[i].includes('|') && isTableSep(lines[i + 1]))) para.push(lines[i++]);
         out.push(`<p>${para.map(inline).join('<br>')}</p>`);
       }
