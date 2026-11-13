@@ -26,18 +26,17 @@ export function renderHtml(o: HtmlOptions): string {
   </div>
   <label for="level">経験レベル</label>
   <select id="level">
-    <option value="beginner">基本(用語を言い換え、基本の仕組みから)</option>
-    <option value="intermediate">実務(設計意図や責務の分担を中心に)</option>
-    <option value="advanced">上級(独自の仕組みやトレードオフを中心に)</option>
+    <option value="beginner">基本</option>
+    <option value="intermediate">実務</option>
+    <option value="advanced">上級</option>
   </select>
-  <label class="check"><input id="testMode" type="checkbox"> テストモード</label>
-  <p>API を呼ぶたびに、目的・モデル・想定トークン数を確認します。入力欄の下に、会話全体を画像で保存するボタンが出ます。</p>
+  <label class="toggle"><input id="testMode" type="checkbox">テストモード</label>
 </div>
 <div id="messages"></div>
 <div id="status" hidden><span class="spinner"></span><span id="statusText">作業中…</span></div>
 <div id="permission" hidden></div>
 <div id="composer">
-  <textarea id="input" rows="1" placeholder="質問や実装の指示を入力… (Shift+Enterで改行)"></textarea>
+  <textarea id="input" rows="1" placeholder="質問や実装の指示を入力"></textarea>
   <div id="toolbar">
     <select id="mode" title="権限モード">
       <option value="acceptEdits">コマンド実行前に確認</option>

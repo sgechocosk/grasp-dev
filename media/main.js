@@ -759,7 +759,7 @@
     inputEl.disabled = !s.hasKey || !s.hasWorkspace;
     inputEl.placeholder = !s.hasWorkspace
       ? 'フォルダを開くと利用できます'
-      : '質問や実装の指示を入力… (Shift+Enterで改行)';
+      : '質問や実装の指示を入力';
     updateStatus();
   }
 
