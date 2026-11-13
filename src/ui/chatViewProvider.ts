@@ -22,6 +22,8 @@ const SECRET_KEY = 'graspDev.openaiApiKey';
 const MODE_KEY = 'graspDev.permissionMode';
 const LEVEL_KEY = 'graspDev.level';
 const TEST_MODE_KEY = 'graspDev.testMode';
+/** 画面の画像を最後に保存したフォルダー (次に保存するときの初期位置) */
+const CAPTURE_DIR_KEY = 'graspDev.captureDir';
 /** ワークスペース内の編集は常に確認なし (変更は取り置かれ、たどり終えてから反映するため)。選べるのはコマンド実行の確認だけ */
 const MODES: PermissionMode[] = ['acceptEdits', 'bypassPermissions'];
 const MAX_SELECTION_CHARS = 4000;
@@ -386,7 +388,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     return choice === RUN || choice === RUN_ALL;
   }
 
-  /** テストモード: Webview が作った会話全体の画像を、ファイルに保存する */
+  /**
+   * テストモード: Webview が作った会話全体の画像を、利用者が選んだ場所に保存する。
+   * 初期位置は前回保存したフォルダー (初回は拡張機能の保存領域の screenshots)。
+   */
   private async saveCapture(dataUrl: string | undefined, error: string | undefined): Promise<void> {
     const m = /^data:image\/png;base64,(.+)$/.exec(dataUrl ?? '');
     if (!m) {
@@ -394,7 +399,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     const stamp = new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15);
-    const file = path.join(this.context.globalStorageUri.fsPath, 'screenshots', `chat-${stamp}.png`);
+    const dir = this.context.globalState.get<string>(CAPTURE_DIR_KEY) || path.join(this.context.globalStorageUri.fsPath, 'screenshots');
+    const picked = await vscode.window.showSaveDialog({
+      title: '会話の画像を保存',
+      saveLabel: '保存',
+      defaultUri: vscode.Uri.file(path.join(dir, `chat-${stamp}.png`)),
+      filters: { 'PNG 画像': ['png'] },
+    });
+    if (!picked) return; // 取り消した
+    const file = /\.png$/i.test(picked.fsPath) ? picked.fsPath : `${picked.fsPath}.png`;
     try {
       await fs.mkdir(path.dirname(file), { recursive: true });
       await fs.writeFile(file, Buffer.from(m[1], 'base64'));
@@ -402,6 +415,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       void vscode.window.showErrorMessage(`画面を保存できませんでした: ${(e as Error).message}`);
       return;
     }
+    await this.context.globalState.update(CAPTURE_DIR_KEY, path.dirname(file));
     const open = 'フォルダーを開く';
     void vscode.window.showInformationMessage(`画面を保存しました: ${file}`, open).then((choice) => {
       if (choice === open) void vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(file));

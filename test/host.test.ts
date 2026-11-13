@@ -11,7 +11,7 @@ import { ProviderRegistry } from '../src/providers/provider';
 import { createDefaultToolRegistry } from '../src/tools';
 import { ChatViewProvider, describeActivity } from '../src/ui/chatViewProvider';
 import type { HostMessage, WebviewMessage } from '../src/ui/protocol';
-import { answers as dialogAnswers, dialogs, output, state as vscodeState } from './stubs/vscode';
+import { answers as dialogAnswers, dialogs, output, saveAnswers, saveDialogs, state as vscodeState } from './stubs/vscode';
 
 const call = (id: string, name: string, args: unknown): ToolCall => ({ id, name, arguments: JSON.stringify(args) });
 const reply = (content: string, toolCalls: ToolCall[] = []): AssistantMessage => ({ role: 'assistant', content, toolCalls });
@@ -31,6 +31,8 @@ function harness(settings: Record<string, unknown> = {}, opts: { ask?: boolean; 
   output.length = 0;
   dialogs.length = 0;
   dialogAnswers.length = 0;
+  saveAnswers.length = 0;
+  saveDialogs.length = 0;
 
   const file = path.join(cwd, 'calc.ts');
   const script = opts.question
@@ -163,17 +165,29 @@ test('テストモード: API を呼ぶ前に目的・モデル・想定トー�
   assert.ok(h.posted.some((m) => m.type === 'event' && m.event.type === 'error' && /取り消しました/.test(m.event.message)));
 });
 
-test('テストモード: 会話全体の画像をファイルに保存する', async () => {
+test('テストモード: 会話全体の画像を、選んだ場所に保存する。次は前回のフォルダーから選べる', async () => {
   const h = harness({ 'graspDev.testMode': true });
   await h.send({ type: 'capture_request' });
   const capture = h.posted.find((m) => m.type === 'capture') as any;
   assert.match(capture.css, /#messages/);
   const png = Buffer.from('89504e470d0a1a0a', 'hex');
-  await h.send({ type: 'capture_result', dataUrl: `data:image/png;base64,${png.toString('base64')}` });
-  const files = fs.readdirSync(path.join(h.storage, 'screenshots'));
-  assert.match(files[0], /^chat-\d{8}-\d{6}\.png$/);
-  assert.deepEqual(fs.readFileSync(path.join(h.storage, 'screenshots', files[0])), png);
-  assert.match(dialogs[dialogs.length - 1].message, /画面を保存しました/);
+  const result = { type: 'capture_result', dataUrl: `data:image/png;base64,${png.toString('base64')}` } as const;
+
+  // 1回目: 初期位置は拡張機能の保存領域。選んだ場所 (拡張子なしでも .png を付ける) に保存する
+  const chosen = fs.mkdtempSync(path.join(os.tmpdir(), 'grasp-shots-'));
+  saveAnswers.push(path.join(chosen, 'my-chat'));
+  await h.send(result);
+  assert.match(saveDialogs[0].defaultPath!, new RegExp(`^${h.storage.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/screenshots/chat-\\d{8}-\\d{6}\\.png$`));
+  assert.deepEqual(saveDialogs[0].filters, { 'PNG 画像': ['png'] });
+  assert.deepEqual(fs.readFileSync(path.join(chosen, 'my-chat.png')), png);
+  assert.match(dialogs[dialogs.length - 1].message, /画面を保存しました: .*my-chat\.png/);
+
+  // 2回目: 前回保存したフォルダーが初期位置になる。取り消せば何も保存しない
+  dialogs.length = 0;
+  await h.send(result);
+  assert.equal(path.dirname(saveDialogs[1].defaultPath!), chosen);
+  assert.deepEqual(fs.readdirSync(chosen), ['my-chat.png']);
+  assert.equal(dialogs.length, 0);
 
   // テストモードでなければ、保存しない
   const off = harness();

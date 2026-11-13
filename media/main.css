@@ -177,7 +177,8 @@ button.opt.sel:disabled, button.opt.ok:disabled, button.opt.attn:disabled { opac
 .plus { color: var(--vscode-testing-iconPassed, #3fb950); }
 .minus { color: var(--vscode-errorForeground); }
 .fdiff summary { cursor: pointer; font-size: 0.92em; opacity: 0.8; }
-.panel label.check { display: flex; align-items: center; gap: 6px; }
+.panel label.toggle { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+.panel label.toggle input { margin: 0; }
 
 /* ---------- 実装の前に決めること ---------- */
 .wtext.qtitle { font-weight: 600; }
