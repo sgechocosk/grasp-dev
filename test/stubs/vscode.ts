@@ -10,9 +10,21 @@ export const Uri = {
   joinPath: (base: { fsPath: string }, ...parts: string[]) => ({ fsPath: [base.fsPath, ...parts].join('/'), scheme: 'file' }),
 };
 
+/** テストから、出力パネルの内容と、ダイアログへの答えを扱う */
+export const output: string[] = [];
+export const dialogs: Array<{ message: string; detail?: string; items: string[] }> = [];
+export const answers: Array<string | undefined> = [];
+
 export const window = {
   activeTextEditor: undefined,
   showTextDocument: async () => undefined,
+  createOutputChannel: () => ({ appendLine: (line: string) => void output.push(line), dispose() {} }),
+  showInformationMessage: async (message: string, ...rest: any[]) => {
+    const options = typeof rest[0] === 'object' ? rest.shift() : {};
+    dialogs.push({ message, detail: options.detail, items: rest });
+    return answers.shift();
+  },
+  showErrorMessage: async (message: string) => void dialogs.push({ message, items: [] }),
 };
 
 export const workspace = {

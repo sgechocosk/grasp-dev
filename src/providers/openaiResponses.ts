@@ -70,7 +70,8 @@ export class OpenAIResponsesProvider implements LLMProvider {
         case 'response.completed':
         case 'response.incomplete':
           if (ev.response?.usage) {
-            usage = { inputTokens: ev.response.usage.input_tokens ?? 0, outputTokens: ev.response.usage.output_tokens ?? 0 };
+            const u = ev.response.usage;
+            usage = { inputTokens: u.input_tokens ?? 0, outputTokens: u.output_tokens ?? 0, cachedTokens: u.input_tokens_details?.cached_tokens ?? 0 };
           }
           break;
         case 'response.failed':

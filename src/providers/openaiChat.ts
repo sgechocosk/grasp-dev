@@ -50,7 +50,11 @@ export class OpenAIChatProvider implements LLMProvider {
     for await (const ev of postSSE(url, this.opts.apiKey, body, req.signal)) {
       if (ev.error) throw new Error(ev.error.message ?? 'APIストリームエラー');
       if (ev.usage) {
-        usage = { inputTokens: ev.usage.prompt_tokens ?? 0, outputTokens: ev.usage.completion_tokens ?? 0 };
+        usage = {
+          inputTokens: ev.usage.prompt_tokens ?? 0,
+          outputTokens: ev.usage.completion_tokens ?? 0,
+          cachedTokens: ev.usage.prompt_tokens_details?.cached_tokens ?? 0,
+        };
       }
       const delta = ev.choices?.[0]?.delta;
       if (!delta) continue;

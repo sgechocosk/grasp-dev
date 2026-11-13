@@ -1,5 +1,5 @@
 import { levelStyle, soundsLikeReport, type LearnerLevel } from './lib/level';
-import { maskAnswers, revealsAnswer } from './lib/leak';
+import { distinctiveWords, revealsAnswer } from './lib/leak';
 import { splitLines } from './lib/text';
 import type { CodeRef, QuizItem } from './lib/types';
 import type { Asker } from './llm';
@@ -117,53 +117,50 @@ export async function checkItemRefs(read: (ref: string) => Promise<{ path: strin
 
 // ---------- 答え漏れの検出と修正 ----------
 
-type LeakField = 'goal' | 'task' | 'refNote' | 'concept' | 'hint0' | 'hint1' | 'clueNote';
+/** 文章の置き場所 (読む・書き戻す) */
+export interface TextSlot {
+  get: () => string;
+  set: (text: string) => void;
+}
 
-interface Leak {
-  id: string;
-  field: LeakField;
-  text: string;
+/** 答える前に利用者へ見せる文章の1つと、そこに出てはいけない答え */
+export interface LeakTarget {
+  /** 何の文章か (書き直しを頼むときに伝える) */
+  label: string;
+  slot: TextSlot;
   answers: string[];
-  item?: number;
-  blank?: number;
-  ref?: number;
+  /** 答える前に明示している名前 (新しく追加する変数など)。答えを特定する材料に数えない */
+  shown?: ReadonlySet<string>;
+  /** 書き直しの参考に見せる、空欄つきのコード */
+  code?: string;
+  /** 短い名詞のタグか (書き直せなければ汎用のタグにする) */
+  tag?: boolean;
 }
 
-/** 答える前に見える文章のうち、答えを漏らしているものを列挙する */
-export function findLeaks(goal: string, items: QuizItem[]): Leak[] {
-  const leaks: Leak[] = [];
-  const answers = items.flatMap((it) => it.blanks.map((b) => b.answer));
-  const shown = new Set(items.flatMap((it) => (it.newNames ?? []).map((n) => n.name)));
-  const check = (leak: Omit<Leak, 'answers'>): void => {
-    const hit = answers.filter((a) => revealsAnswer(leak.text, a, shown));
-    if (hit.length > 0) leaks.push({ ...leak, answers: hit });
-  };
-  check({ id: 'goal', field: 'goal', text: goal });
-  items.forEach((item, i) => {
-    check({ id: `${i}.task`, field: 'task', text: item.task ?? '', item: i });
-    (item.refs ?? []).forEach((r, k) => check({ id: `${i}.ref${k}`, field: 'refNote', text: r.note, item: i, ref: k }));
-    item.blanks.forEach((b, k) => {
-      check({ id: `${i}.${k}.concept`, field: 'concept', text: b.concept, item: i, blank: k });
-      b.hints.forEach((h, level) => check({ id: `${i}.${k}.hint${level}`, field: `hint${level}` as LeakField, text: h, item: i, blank: k }));
-      if (b.clue) check({ id: `${i}.${k}.clue`, field: 'clueNote', text: b.clue.note, item: i, blank: k });
-    });
-  });
-  return leaks;
+function leaking(t: LeakTarget): string[] {
+  return t.answers.filter((a) => revealsAnswer(t.slot.get(), a, t.shown));
 }
 
-function applyLeakFix(goal: { value: string }, items: QuizItem[], leak: Leak, text: string): void {
-  const item = leak.item !== undefined ? items[leak.item] : undefined;
-  const blank = item && leak.blank !== undefined ? item.blanks[leak.blank] : undefined;
-  if (leak.field === 'goal') goal.value = text;
-  else if (leak.field === 'task') {
-    if (item) item.task = text;
-  } else if (leak.field === 'refNote') {
-    if (item?.refs && leak.ref !== undefined && item.refs[leak.ref]) item.refs[leak.ref].note = text;
-  } else if (leak.field === 'concept') {
-    if (blank) blank.concept = text;
-  } else if (leak.field === 'clueNote') {
-    if (blank?.clue) blank.clue.note = text;
-  } else if (blank) blank.hints[Number(leak.field.slice(4))] = text;
+/** 問いの中の、答える前に見える文章 (目標・課題文・参考コードの説明・概念タグ・手がかり) */
+export function quizLeakTargets(quiz: { goal: string; items: QuizItem[] }): LeakTarget[] {
+  // 別の問いの答えも、同じ画面に並ぶので漏れになる
+  const answers = quiz.items.flatMap((it) => it.blanks.map((b) => b.answer));
+  const shown = new Set(quiz.items.flatMap((it) => (it.newNames ?? []).map((n) => n.name)));
+  const out: LeakTarget[] = [{ label: '目標', slot: { get: () => quiz.goal, set: (t) => (quiz.goal = t) }, answers, shown }];
+  for (const item of quiz.items) {
+    const base = { answers, shown, code: item.quizCode };
+    out.push({ ...base, label: '課題文', slot: { get: () => item.task ?? '', set: (t) => (item.task = t) } });
+    for (const r of item.refs ?? []) out.push({ ...base, label: '参考コードの説明', slot: { get: () => r.note, set: (t) => (r.note = t) } });
+    for (const b of item.blanks) {
+      out.push({ ...base, label: '概念タグ(短い名詞)', tag: true, slot: { get: () => b.concept, set: (t) => (b.concept = t) } });
+      b.hints.forEach((_, k) =>
+        out.push({ ...base, label: k === 0 ? '考える材料1(どんな概念・仕組みが関わるか)' : '考える材料2(どこを見てどう考えるか)', slot: { get: () => b.hints[k], set: (t) => (b.hints[k] = t) } }),
+      );
+      const clue = b.clue;
+      if (clue) out.push({ ...base, label: '参考にする場所の説明', slot: { get: () => clue.note, set: (t) => (clue.note = t) } });
+    }
+  }
+  return out;
 }
 
 const LEAK_FIX_SCHEMA = {
@@ -181,77 +178,60 @@ const LEAK_FIX_SCHEMA = {
   },
 } as const;
 
-const FIELD_LABEL: Record<LeakField, string> = {
-  goal: '目標',
-  task: '課題文',
-  refNote: '参考コードの説明',
-  concept: '概念タグ(短い名詞)',
-  hint0: '手がかり1(どんな概念・仕組みが関わるか)',
-  hint1: '手がかり2(どこを見てどう考えるか)',
-  clueNote: '手がかりの場所の説明',
-};
+/**
+ * 答えを含む文だけを取り除く (伏せ字にはしない: 伏せ字の多い文章は、理由を理解する妨げになる)。
+ * 文単位で落とし、それでも答えの識別子がそろって残るなら、その識別子を含む文も落とす。
+ */
+export function withoutLeaks(text: string, answers: string[], shown: ReadonlySet<string> = new Set()): string {
+  const reveals = (t: string): boolean => answers.some((a) => revealsAnswer(t, a, shown));
+  let sentences = (text ?? '').split(/(?<=[。\n])/).filter((s) => !reveals(s));
+  if (reveals(sentences.join(''))) {
+    const words = new Set(answers.flatMap(distinctiveWords).filter((w) => !shown.has(w)));
+    sentences = sentences.filter((s) => ![...words].some((w) => new RegExp(`(?<![\\w$])${w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\w$])`).test(s)));
+  }
+  const out = sentences.join('').trim();
+  return reveals(out) ? '' : out;
+}
 
 /**
- * 答える前に見える文章の答え漏れを LLM に書き直させ、それでも残るものは伏せ字にする。
+ * 答える前に見える文章の答え漏れを LLM に書き直させ、それでも残るものは、答えを含む文を取り除く。
  * 「答えを書かない」という指示だけでは守られないので、機械的に確かめて必ず塞ぐ。
  */
-export async function removeAnswerLeaks(
-  asker: Asker,
-  level: LearnerLevel,
-  quiz: { goal: string; items: QuizItem[] },
-  signal: AbortSignal,
-): Promise<void> {
-  const goal = { value: quiz.goal };
-  let leaks = findLeaks(goal.value, quiz.items);
-  if (leaks.length > 0) {
-    try {
-      const res = await asker.fresh<{ fixes?: Array<{ id: string; text: string }> }>(
-        [
-          'あなたはコードの理解を支援する文章の編集者です。以下の文章は、答える前に利用者へ見せるのに、答え(空欄に入るコード)を漏らしています。',
-          '各 id について、答えのコード片も、答えに含まれる識別子の組み合わせも使わずに、同じ役割の文章へ書き直してください。',
-          '答えを言う代わりに、関わる概念・見るべき場所・考え方・答えの形(言葉で)を示します。日本語で、元と同じくらいの長さにします。',
-          levelStyle(level),
-        ].join('\n'),
-        leaks
-          .map((l) => {
-            const item = l.item !== undefined ? quiz.items[l.item] : undefined;
-            return [
-              `id: ${l.id}`,
-              `種類: ${FIELD_LABEL[l.field]}`,
-              `現在の文章: ${l.text}`,
-              `漏れている答え: ${l.answers.join(' / ')}`,
-              item ? `コード(___BLANK___が空欄):\n${item.quizCode}` : '',
-            ]
-              .filter(Boolean)
-              .join('\n');
-          })
-          .join('\n\n'),
-        LEAK_FIX_SCHEMA,
-        signal,
-      );
-      for (const leak of leaks) {
-        const fix = (res.fixes ?? []).find((f) => f.id === leak.id)?.text?.trim();
-        if (fix && !leak.answers.some((a) => revealsAnswer(fix, a))) applyLeakFix(goal, quiz.items, leak, fix);
-      }
-    } catch (error) {
-      if (signal.aborted) throw error;
-      // 書き直しに失敗しても、下の伏せ字で必ず塞ぐ
-    }
-    leaks = findLeaks(goal.value, quiz.items);
-    for (const leak of leaks) {
-      applyLeakFix(goal, quiz.items, leak, leak.field === 'concept' ? 'コード理解' : maskAnswers(leak.text, leak.answers));
-    }
+export async function removeAnswerLeaks(asker: Asker, level: LearnerLevel, targets: LeakTarget[], signal: AbortSignal): Promise<void> {
+  const leaks = targets.filter((t) => leaking(t).length > 0);
+  if (leaks.length === 0) return;
+  try {
+    const res = await asker.fresh<{ fixes?: Array<{ id: string; text: string }> }>(
+      [
+        'あなたはコードの理解を支援する文章の編集者です。以下の文章は、利用者が自分で考える前に見せるのに、考えてもらうコード(空欄に入るコード)を先に言ってしまっています。',
+        '各 id について、そのコード片も、そこに含まれる識別子の組み合わせも使わずに、同じ役割の文章へ書き直してください。',
+        'コードを言う代わりに、何のために変えるのか・何に合わせるのか・見るべき場所・考え方を言葉で示します。伏せ字(〇〇・***・…)は使いません。日本語で、元と同じくらいの長さにします。',
+        levelStyle(level),
+      ].join('\n'),
+      leaks
+        .map((t, i) =>
+          [`id: f${i}`, `種類: ${t.label}`, `現在の文章: ${t.slot.get()}`, `先に言ってしまっているコード: ${leaking(t).join(' / ')}`, t.code ? `コード(___BLANK___が空欄):\n${t.code}` : '']
+            .filter(Boolean)
+            .join('\n'),
+        )
+        .join('\n\n'),
+      LEAK_FIX_SCHEMA,
+      signal,
+    );
+    leaks.forEach((t, i) => {
+      const fix = (res.fixes ?? []).find((f) => f.id === `f${i}`)?.text?.trim();
+      if (fix && !/〇〇|○○|\*\*\*/.test(fix) && !t.answers.some((a) => revealsAnswer(fix, a, t.shown))) t.slot.set(fix);
+    });
+  } catch (error) {
+    if (signal.aborted) throw error;
+    // 書き直しに失敗しても、下で必ず塞ぐ
   }
-  quiz.goal = goal.value;
+  for (const t of leaks) {
+    if (leaking(t).length > 0) t.slot.set(t.tag ? 'コード理解' : withoutLeaks(t.slot.get(), t.answers, t.shown));
+  }
 }
 
 // ---------- 利用者が主体の言い方にそろえる ----------
-
-/** 文章の置き場所 (読む・書き戻す) */
-export interface TextSlot {
-  get: () => string;
-  set: (text: string) => void;
-}
 
 const VOICE_FIX_SCHEMA = { name: 'voice_fix', schema: LEAK_FIX_SCHEMA.schema } as const;
 

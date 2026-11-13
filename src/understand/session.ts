@@ -125,7 +125,6 @@ export class UnderstandSession {
       return true;
     }
 
-    this.o.status('変更を整理しています…');
     await writeState(changes, 'before');
     this.held = { changes, unheld };
     const base = { cwd: this.o.cwd, request: opts.request, changes, unheld, recorder };

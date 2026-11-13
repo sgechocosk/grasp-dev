@@ -1,17 +1,19 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { FileChange } from './changeSet';
-import { analyzeImpact, PATTERNS, placeLabel, type Obligation, type Site, type WorkspaceView } from './impact';
+import { analyzeImpact, PATTERNS, placeLabel, type Obligation, type WorkspaceView } from './impact';
 import { eliminationHint } from './lib/choices';
 import { declarationsOf } from './lib/declarations';
 import { diffHunks, diffStat } from './lib/diff';
-import { maskAnswers, revealsAnswer } from './lib/leak';
 import { levelGuide, levelStyle, type LearnerLevel } from './lib/level';
 import { compactItem, foldRanges, gradeBlanks, validateRawItem, type RawBlank, type RawItem, type RawRef } from './lib/quiz';
 import { makeRng, numberLines, sha1, shuffle, splitLines, truncate } from './lib/text';
 import type { McqQuestion, NewName, QuizItem } from './lib/types';
 import type { Asker } from './llm';
-import { BLANKS_SCHEMA, checkItemRefs, distractorRules, itemSlots, leakRules, NEW_NAMES_SCHEMA, REFS_SCHEMA, removeAnswerLeaks, rewriteReports, type TextSlot } from './quizCommon';
+import {
+  BLANKS_SCHEMA, checkItemRefs, distractorRules, itemSlots, leakRules, NEW_NAMES_SCHEMA, quizLeakTargets, REFS_SCHEMA, removeAnswerLeaks, rewriteReports,
+  type LeakTarget, type TextSlot,
+} from './quizCommon';
 import type { CommandRecord, Recorder } from './recorder';
 import { buildSteps, condense, reorderByCause, STEP_KIND_LABEL, type Step } from './steps';
 
@@ -36,7 +38,7 @@ export interface LessonStep {
   item?: QuizItem;
   /** 次に確認すべき場所の予想 */
   question?: McqQuestion & { hint: string };
-  /** 答える前に見せる文章 (答えが出ていたら伏せたもの) */
+  /** 答える前に見せる文章 (これから考えてもらうコードを先に言っていたら、書き直すか、その文を除いたもの) */
   display: { label: string; why: string; contract: string };
 }
 
@@ -45,7 +47,10 @@ export interface Lesson {
   /** 依頼をどう理解したか */
   goal: string;
   criteria: string[];
+  /** 変更全体の流れ */
   overall: string;
+  /** 動作をどう確かめたか・何が確かめられていないか */
+  verification: string;
   steps: LessonStep[];
   obligations: Obligation[];
   changes: FileChange[];
@@ -108,6 +113,7 @@ const INTERVIEW_SCHEMA = {
       understanding: STRING,
       acceptanceCriteria: { type: 'array', items: STRING },
       overall: STRING,
+      verification: STRING,
       steps: {
         type: 'array',
         items: {
@@ -122,7 +128,7 @@ const INTERVIEW_SCHEMA = {
         items: { type: 'object', properties: { id: STRING, reason: STRING }, required: ['id', 'reason'], additionalProperties: false },
       },
     },
-    required: ['understanding', 'acceptanceCriteria', 'overall', 'steps', 'sites'],
+    required: ['understanding', 'acceptanceCriteria', 'overall', 'verification', 'steps', 'sites'],
     additionalProperties: false,
   },
 } as const;
@@ -131,6 +137,7 @@ interface RawInterview {
   understanding?: string;
   acceptanceCriteria?: string[];
   overall?: string;
+  verification?: string;
   steps?: Array<{ id?: string; label?: string; why?: string; criterion?: number; contract?: string }>;
   sites?: Array<{ id?: string; reason?: string }>;
 }
@@ -172,13 +179,16 @@ function interviewPrompt(deps: LessonDeps, steps: Step[], obligations: Obligatio
     '- steps: 上の各ステップについて1件ずつ(id はそのまま)。',
     '  - label: そのステップで何をするかの短い見出し(20文字程度。「〜する」の形。コードは書かない)。',
     '  - why: なぜその場所を、そう変える必要があるか。ほかのステップの変更に合わせるものなら、どの変更に合わせるのかを書く。2〜3文。',
+    '  - label・why・contract は、このあと利用者が変更後のコードを自分で考える前に読む。変更後のコードの式・呼び出し・値をそのまま書かず、何のために何をどう変えるのかを言葉で説明する(関数名・型名・ファイル名を挙げるのはよい)。',
     '  - criterion: 主にどの受け入れ条件のための変更か(1始まりの番号。特定の条件に結びつかなければ 0)。',
     '  - contract: この変更によって、ほかのコードから見た使い方がどう変わるか(関数の引数・戻り値・型の項目・メッセージの種類・設定キーなど)を1文。変わらなければ空文字。',
     '- sites: 上の各場所について1件ずつ(id はそのまま)。',
     '  - 「変更が必要だった」場所: なぜそこも変える必要があるか。',
     '  - 「読んだうえで変更不要とした」場所: なぜ変えなくてよいかを、その行のコードを根拠に。',
     '  - 「一度も読んでいない」場所: reason は空文字にする(確かめていないことを推測で書かない)。',
-    '- overall: 変更全体の流れ(どこから始めて、何に波及するか)を、ファイル名を挙げて3〜5文。',
+    '- overall: 変更全体の流れ(どこから始めて、何に波及するか)を、ファイル名を挙げて2〜4文。',
+    '- verification: この変更が動くことを、何を実行してどこまで確かめてあるか(テスト・型検査・ビルドなど)と、まだ確かめられていないことを1〜3文。コマンド名だけでなく、それで何が分かるのかを書く。',
+    '  何も実行していなければ、そのことと、反映後に何を実行すれば確かめられるかを書く。',
     '',
     `- ${levelStyle(deps.level)}`,
   ].join('\n');
@@ -347,35 +357,32 @@ function placePool(deps: LessonDeps, obligations: Obligation[]): string[] {
   return out;
 }
 
-/** 「この変更のあと、確認が必要になる場所はどこか」の予想 */
+/**
+ * 「この変更に合わせて、ほかに変更が必要になる場所はどこか」の予想。
+ * 実際に変更が必要だった場所があるステップにだけ出す (答えがコードで確かめられるものに限る)。
+ * 変更が不要だった場所・読まれていない場所は、選択肢に入れない (必要とも不要とも言い切れないため)。
+ */
 export function nextCheckQuestion(step: Step, obligations: Obligation[], pool: string[], rng: () => number): (McqQuestion & { hint: string }) | undefined {
   const mine = obligations.filter((o) => o.step === step.id);
-  // 変更が必要だった場所を優先して正解にする
-  const places = new Map<string, boolean>();
-  for (const o of mine) {
-    for (const s of o.sites) places.set(placeLabel(s), (places.get(placeLabel(s)) ?? false) || s.verdict === 'changed');
-  }
   const own = new Set<string>();
   for (const e of step.edits) {
     own.add(e.path);
     for (const d of declarationsOf(splitLines(e.after))) own.add(`${e.path} の ${d.name}`);
   }
-  const correct = [...places]
-    .sort((a, b) => Number(b[1]) - Number(a[1]))
-    .map(([label]) => label)
-    .filter((label) => !own.has(label))
-    .slice(0, 2);
+  const related = new Set(mine.flatMap((o) => o.sites.map(placeLabel)));
+  const changed = mine.filter((o) => o.sites.some((s) => s.verdict === 'changed'));
+  const correct = [...new Set(changed.flatMap((o) => o.sites.filter((s) => s.verdict === 'changed').map(placeLabel)))].filter((l) => !own.has(l)).slice(0, 2);
   if (correct.length === 0) return undefined;
-  const distractors = shuffle([...new Set(pool)].filter((l) => !places.has(l) && !own.has(l)), rng).slice(0, 4 - correct.length);
+  const distractors = shuffle([...new Set(pool)].filter((l) => !related.has(l) && !own.has(l)), rng).slice(0, 4 - correct.length);
   if (distractors.length < 2) return undefined;
   const options = shuffle([...correct, ...distractors], rng);
-  const patterns = [...new Set(mine.map((o) => o.pattern))];
+  const patterns = [...new Set(changed.map((o) => o.pattern))];
   return {
     id: `next:${step.id}`,
     prompt:
       correct.length > 1
-        ? `この変更のあと、確認が必要になる場所をすべて選んでください(該当は${correct.length}か所)。`
-        : 'この変更のあと、確認が必要になる場所はどこですか?',
+        ? `この変更に合わせて、ほかに変更が必要になる場所をすべて選んでください(該当は${correct.length}か所)。`
+        : 'この変更に合わせて、ほかに変更が必要になる場所はどこですか?',
     options,
     correct: correct.map((c) => options.indexOf(c)).sort((a, b) => a - b),
     explanation: '',
@@ -386,39 +393,22 @@ export function nextCheckQuestion(step: Step, obligations: Obligation[], pool: s
 
 // ---------- 組み立て ----------
 
-function whyText(step: Step, steps: Step[], criteria: string[]): string {
-  const lines: string[] = [];
+/** この変更がどこから来たか: どの受け入れ条件のためか、どのステップの変更に合わせるのか */
+function originText(step: Step, steps: Step[], criteria: string[]): string {
   const cause = step.causedBy ? steps.find((s) => s.id === step.causedBy!.step) : undefined;
-  if (cause) lines.push(`ステップ${cause.number}「${cause.label}」の変更に合わせるため(${step.causedBy!.pattern})。`);
-  else if (step.criterion >= 1 && criteria[step.criterion - 1]) lines.push(`受け入れ条件 ${step.criterion}「${criteria[step.criterion - 1]}」を満たすため。`);
-  if (step.why) lines.push(step.why);
-  return lines.join('\n');
+  if (cause) return `ステップ${cause.number}「${cause.label}」の変更に合わせるため(${step.causedBy!.pattern})。`;
+  if (step.criterion >= 1 && criteria[step.criterion - 1]) return `受け入れ条件 ${step.criterion}「${criteria[step.criterion - 1]}」を満たすため。`;
+  return '';
 }
 
-function overallText(lesson: Pick<Lesson, 'goal' | 'steps' | 'obligations'>, summary: string): string {
-  const lines: string[] = [];
-  if (summary) lines.push(summary, '');
-  lines.push('手順:');
-  for (const { step: s } of lesson.steps) {
-    const cause = s.causedBy ? lesson.steps.find((x) => x.step.id === s.causedBy!.step)?.step : undefined;
-    const origin = cause ? `ステップ${cause.number}の変更に合わせる(${s.causedBy!.pattern})` : '依頼を満たすための起点になる変更';
-    lines.push(`${s.number}. ${s.label} — ${[...new Set(s.edits.map((e) => e.path))].join(', ')}(${origin})`);
-  }
-  const sites = lesson.obligations.flatMap((o) => o.sites);
-  if (sites.length > 0) {
-    const count = (v: Site['verdict']) => sites.filter((s) => s.verdict === v).length;
-    lines.push(
-      `影響の確認: ${lesson.obligations.length}件の変更について、影響が及びうる場所は${sites.length}か所。うち${count('changed')}か所は変更が必要、` +
-        `${count('checked')}か所は変更不要、${count('unseen')}か所は未確認。`,
-    );
-  }
-  return lines.join('\n');
+function whyText(step: Step, steps: Step[], criteria: string[]): string {
+  return [originText(step, steps, criteria), step.why].filter(Boolean).join('\n');
 }
 
 /** 問いを作らず、差分だけを見せる形 (中断・失敗したとき) */
 export function plainLesson(deps: Pick<LessonDeps, 'changes' | 'unheld' | 'recorder' | 'request'>, notice: string): Lesson {
   return {
-    kind: 'lesson', goal: deps.request, criteria: [], overall: '', steps: [], obligations: [],
+    kind: 'lesson', goal: deps.request, criteria: [], overall: '', verification: '', steps: [], obligations: [],
     changes: deps.changes, unheld: deps.unheld, commands: deps.recorder.commands, notice,
   };
 }
@@ -430,7 +420,7 @@ export async function buildLesson(deps: LessonDeps): Promise<Lesson> {
   steps = reorderByCause(steps);
   steps = condense(steps, obligations, new Set(quizTargets(steps).map((s) => s.id)));
 
-  status('変更の理由と考えどころを整理しています…');
+  status('変更の手順を組み立てています…');
   // 理由の聞き取りと、問いの場所の指定は、どちらも作業した会話の続きとして並行に聞く
   const [interview, items] = await Promise.all([
     deps.asker.fork<RawInterview>(interviewPrompt(deps, steps, obligations), INTERVIEW_SCHEMA, deps.signal).catch((e) => {
@@ -473,33 +463,43 @@ export async function buildLesson(deps: LessonDeps): Promise<Lesson> {
     ...visible.items.flatMap(itemSlots),
   ];
   await rewriteReports(deps.asker, deps.level, slots, deps.signal);
+
+  // 答える前に見せる文章 (見出し・理由・影響する変更点) は、答え合わせのあとに見せる全文とは別に持つ。
+  // これから考えてもらうコードを先に言っている文章は、書き直させる (それでも残れば、その文だけを除く。伏せ字にはしない)
+  const displays = new Map(steps.map((s) => [s.id, { label: s.label, origin: originText(s, steps, criteria), why: s.why, contract: s.contract }]));
+  const targets: LeakTarget[] = quizLeakTargets(visible);
+  for (const s of steps) {
+    const item = items.get(s.id);
+    const d = displays.get(s.id)!;
+    if (!item) continue;
+    const base = { answers: item.blanks.map((b) => b.answer), shown: new Set((item.newNames ?? []).map((n) => n.name)), code: item.quizCode };
+    targets.push(
+      { ...base, label: 'ステップの見出し', slot: { get: () => d.label, set: (t) => (d.label = t) } },
+      { ...base, label: '変更の理由(どの条件・どの変更のためか)', slot: { get: () => d.origin, set: (t) => (d.origin = t) } },
+      { ...base, label: '変更の理由', slot: { get: () => d.why, set: (t) => (d.why = t) } },
+      { ...base, label: 'ほかの場所に影響する変更点', slot: { get: () => d.contract, set: (t) => (d.contract = t) } },
+    );
+  }
   if (visible.items.length > 0) {
-    status('手がかりの文章を点検しています…');
-    await removeAnswerLeaks(deps.asker, deps.level, visible, deps.signal);
+    status('説明文を確認しています…');
+    await removeAnswerLeaks(deps.asker, deps.level, targets, deps.signal);
   }
 
   const pool = placePool(deps, obligations);
   const rng = makeRng(parseInt(sha1(deps.request + steps.map((s) => s.id + s.label).join()).slice(0, 8), 16));
   const lessonSteps: LessonStep[] = steps.map((step) => {
-    const item = items.get(step.id);
-    const display = { label: step.label, why: whyText(step, steps, criteria), contract: step.contract };
-    if (item) {
-      // 聞き取りで得た文章 (見出し・理由・約束の変化) に、このステップの答えが出ていれば、答える前は伏せる
-      const answers = item.blanks.map((b) => b.answer);
-      const shown = new Set((item.newNames ?? []).map((n) => n.name));
-      for (const field of ['label', 'why', 'contract'] as const) {
-        const hit = answers.filter((a) => revealsAnswer(display[field], a, shown));
-        if (hit.length > 0) display[field] = maskAnswers(display[field], hit);
-      }
-    }
-    return { step, item, question: nextCheckQuestion(step, obligations, pool, rng), display };
+    const d = displays.get(step.id)!;
+    return {
+      step,
+      item: items.get(step.id),
+      question: nextCheckQuestion(step, obligations, pool, rng),
+      display: { label: d.label || step.label, why: [d.origin, d.why].filter(Boolean).join('\n'), contract: d.contract },
+    };
   });
-  const lesson: Lesson = {
-    kind: 'lesson', goal: visible.goal, criteria, overall: '', steps: lessonSteps, obligations,
+  return {
+    kind: 'lesson', goal: visible.goal, criteria, overall: overall.text, verification: interview.verification?.trim() ?? '', steps: lessonSteps, obligations,
     changes: deps.changes, unheld: deps.unheld, commands: deps.recorder.commands,
   };
-  lesson.overall = overallText(lesson, overall.text);
-  return lesson;
 }
 
 // ---------- 画面に渡す形 ----------
@@ -601,16 +601,20 @@ export function revealPayload(lesson: Lesson, index: number, answer: StepAnswer)
     blanks,
     diffs: s.edits.map((e) => ({ path: e.path, created: e.created, deleted: e.deleted, diff: showDiff(e.before, e.after) })),
     question: q ? { correct: picked.length === q.correct.length && picked.every((c, k) => c === q.correct[k]), correctIndexes: q.correct, chosen: picked } : undefined,
+    // 影響の確認: この変更で変わったものを使っている場所と、それぞれ変更が要るかどうかの判断。
+    // 作業の中で読まれなかった場所は、判断が無いので、件数と一覧だけを控えめに添える
     checks: lesson.obligations
       .filter((o) => o.step === s.id)
       .map((o) => ({
         pattern: PATTERNS[o.pattern].name,
-        trigger: PATTERNS[o.pattern].trigger,
         subject: o.subject,
         howToFind: PATTERNS[o.pattern].howToFind,
         criterion: PATTERNS[o.pattern].criterion,
+        results: o.sites
+          .filter((p) => p.verdict !== 'unseen')
+          .map((p) => ({ path: p.path, line: p.line, label: placeLabel(p), verdict: p.verdict, reason: p.reason, step: numberOf(p.step) })),
+        others: o.sites.filter((p) => p.verdict === 'unseen').map((p) => ({ path: p.path, line: p.line, label: placeLabel(p) })),
         more: o.more,
-        results: o.sites.map((p) => ({ path: p.path, line: p.line, text: p.text, label: placeLabel(p), verdict: p.verdict, reason: p.reason, step: numberOf(p.step) })),
       })),
     last: index === lesson.steps.length - 1,
   };
@@ -618,13 +622,29 @@ export function revealPayload(lesson: Lesson, index: number, answer: StepAnswer)
 
 /** 最後のまとめ (反映前の確認材料) */
 export function finalPayload(lesson: Lesson): Record<string, unknown> {
-  const unseen = lesson.obligations.flatMap((o) =>
-    o.sites.filter((p) => p.verdict === 'unseen').map((p) => ({ path: p.path, line: p.line, label: placeLabel(p), subject: o.subject, pattern: PATTERNS[o.pattern].name })),
-  );
+  const steps = lesson.steps.map((x) => x.step);
+  // 同じコマンドを何度も実行していれば、最後の結果だけを見せる
+  const last = new Map<string, CommandRecord>();
+  for (const c of lesson.commands) {
+    last.delete(c.command);
+    last.set(c.command, c);
+  }
   return {
     overall: lesson.overall,
-    criteria: lesson.criteria,
     notice: lesson.notice,
+    // 受け入れ条件と、それを満たすためのステップ
+    criteria: lesson.criteria.map((text, i) => ({ text, steps: steps.filter((s) => s.criterion === i + 1).map((s) => s.number) })),
+    // 手順のふりかえり: 何を、どのファイルで、何のために
+    steps: steps.map((s) => {
+      const cause = s.causedBy ? steps.find((x) => x.id === s.causedBy!.step) : undefined;
+      return {
+        number: s.number,
+        label: s.label,
+        kind: STEP_KIND_LABEL[s.kind],
+        files: [...new Set(s.edits.map((e) => e.path))],
+        origin: cause ? `ステップ${cause.number}に合わせる` : s.criterion >= 1 ? `条件${s.criterion}のため` : '',
+      };
+    }),
     files: lesson.changes.map((c) => ({
       path: c.rel,
       created: c.before === null,
@@ -633,9 +653,9 @@ export function finalPayload(lesson: Lesson): Record<string, unknown> {
       // 手順を組み立てられなかったときは、ここで差分を見せる
       diff: lesson.steps.length === 0 ? truncate(showDiff(c.before ?? '', c.after ?? ''), 6000) : undefined,
     })),
-    commands: lesson.commands.map((c) => ({ command: truncate(c.command, 200), ok: c.ok })),
-    unseen,
-    unseenMore: lesson.obligations.reduce((n, o) => n + o.more, 0),
+    // 動作確認: 何をどこまで確かめてあるか (文章) と、実行したコマンドの結果
+    verification: lesson.verification,
+    commands: [...last.values()].map((c) => ({ command: truncate(c.command, 200), description: c.description, ok: c.ok })),
     unheld: lesson.unheld,
   };
 }

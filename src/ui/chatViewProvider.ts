@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { existsSync } from 'node:fs';
+import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { CONFIG } from '../config';
@@ -7,24 +8,49 @@ import { Agent } from '../core/agent';
 import { PermissionManager, type PermissionDecision, type PermissionMode } from '../core/permissions';
 import { buildSystemPrompt } from '../core/systemPrompt';
 import { createConversationState, type AgentEvent, type ConversationState } from '../core/types';
+import { observeProvider, type CallInfo } from '../providers/observe';
 import type { ProviderRegistry } from '../providers/provider';
-import { resolvePath, ToolRegistry } from '../tools/tool';
+import { displayPath, resolvePath, ToolRegistry } from '../tools/tool';
 import { ASK_INSTRUCTIONS, createAskUserTool, type AskQuestion } from '../understand/askUser';
 import { coerceLevel, type LearnerLevel } from '../understand/lib/level';
 import { createAsker } from '../understand/llm';
 import { UnderstandSession, type WalkMessage } from '../understand/session';
 import { renderHtml } from './html';
-import type { HostMessage, ToolItem, TranscriptItem, ViewState, WebviewMessage } from './protocol';
+import type { HostMessage, PermissionView, TranscriptItem, ViewState, WebviewMessage } from './protocol';
 
 const SECRET_KEY = 'graspDev.openaiApiKey';
 const MODE_KEY = 'graspDev.permissionMode';
-const UNDERSTAND_KEY = 'graspDev.understand';
 const LEVEL_KEY = 'graspDev.level';
+const TEST_MODE_KEY = 'graspDev.testMode';
 /** ワークスペース内の編集は常に確認なし (変更は取り置かれ、たどり終えてから反映するため)。選べるのはコマンド実行の確認だけ */
 const MODES: PermissionMode[] = ['acceptEdits', 'bypassPermissions'];
 const MAX_SELECTION_CHARS = 4000;
-/** 表示用に保持するツール出力の上限 (モデルに渡す履歴は別管理) */
-const MAX_TRANSCRIPT_OUTPUT = 8000;
+const RUN = '実行';
+const RUN_ALL = 'この処理では以降確認しない';
+
+const short = (text: string, max = 70): string => {
+  const one = text.replace(/\s+/g, ' ').trim();
+  return one.length > max ? one.slice(0, max) + '…' : one;
+};
+
+/**
+ * いま行っている作業を、1行の文にする (入力欄の上に出す)。
+ * ツールの呼び出しそのものは会話に出さない。編集は、どこを変えたかが答えの手がかりになるので場所を書かない。
+ */
+export function describeActivity(name: string, input: any, cwd: string): string {
+  const file = typeof input?.file_path === 'string' ? displayPath(cwd, input.file_path) : '';
+  switch (name) {
+    case 'Read': return `ファイルを読んでいます: ${file}`;
+    case 'Grep': return `コードを検索しています: ${short(String(input?.pattern ?? ''), 40)}`;
+    case 'Glob': return `ファイルを探しています: ${short(String(input?.pattern ?? ''), 40)}`;
+    case 'Edit':
+    case 'Write': return 'コードを書き換えています';
+    case 'Bash': return `コマンドを実行しています: ${short(String(input?.command ?? ''))}`;
+    case 'TodoWrite': return '作業の段取りを整理しています';
+    case 'AskUser': return '実装の前に決めることを確認しています';
+    default: return `${name} を実行しています`;
+  }
+}
 
 export class ChatViewProvider implements vscode.WebviewViewProvider {
   static readonly viewType = 'graspDev.chat';
@@ -35,20 +61,24 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private transcript: TranscriptItem[] = [];
   private abort?: AbortController;
   private pendingPermissions = new Map<string, (d: PermissionDecision) => void>();
+  /** 利用者の返事を待っている許可の確認 (画面が作り直されたときに出し直す) */
+  private permissionView?: PermissionView;
   private permissions: PermissionManager;
   private rgPath = findBundledRipgrep();
-  /** 取り置きと、たどる手順の進行役 (ワークスペースごと) */
+  /** 取り置きと、たどる手順の進行役 */
   private session?: UnderstandSession;
-  /** 実行中、作業の中身 (編集内容・途中の文章) を画面に出さずに控えているか */
-  private hiding = false;
-  /** 控えている作業の記録。手順をたどり終えたら開示する */
-  private heldItems: TranscriptItem[] = [];
-  /** 控えずに画面へ出したツール (許可の確認が要るもの) */
-  private shownTools = new Set<string>();
+  /** 実行中のツール呼び出し (許可の確認と、作業の表示に使う) */
+  private calls = new Map<string, { name: string; input: any }>();
+  /** 最後の応答の文章 (質問への回答として、問いをたどり終えてから見せる) */
+  private lastAnswer = '';
   private runFailed = false;
   /** 利用者の回答を待っている質問 */
   private pendingAsks = new Map<string, (answers: string[] | undefined) => void>();
   private askCount = 0;
+  /** 出力パネル「GraspDev」: OpenAI API を呼ぶたびの記録 (モデル・入出力トークン数・キャッシュ)。ツールの使用は記録しない */
+  private readonly output = vscode.window.createOutputChannel('GraspDev');
+  /** テストモードで「この処理では以降確認しない」を選んだか (依頼ごとに戻す) */
+  private skipConfirm = false;
 
   constructor(
     private context: vscode.ExtensionContext,
@@ -60,6 +90,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       (req, signal) => new Promise((resolve) => {
         const finish = (d: PermissionDecision) => {
           this.pendingPermissions.delete(req.toolCallId);
+          if (this.permissionView?.toolCallId === req.toolCallId) this.permissionView = undefined;
           resolve(d);
         };
         signal.addEventListener('abort', () => {
@@ -67,14 +98,22 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           finish({ behavior: 'deny' });
         }, { once: true });
         this.pendingPermissions.set(req.toolCallId, finish);
-        this.showHeldTool(req.toolCallId);
-        this.post({ type: 'permission_request', toolCallId: req.toolCallId, key: req.key });
+        const call = this.calls.get(req.toolCallId);
+        const cwd = this.cwd() ?? '';
+        this.permissionView = {
+          toolCallId: req.toolCallId,
+          key: req.key,
+          title: call?.name === 'Bash' ? 'このコマンドを実行しますか?' : call?.name === 'Edit' || call?.name === 'Write' ? 'ワークスペースの外のファイルを書き換えますか?' : `${req.toolName} を実行しますか?`,
+          detail: call?.name === 'Bash' ? String(call.input?.command ?? '') : typeof call?.input?.file_path === 'string' ? displayPath(cwd, call.input.file_path) : '',
+        };
+        this.post({ type: 'permission_request', ...this.permissionView });
         // サイドバーが閉じていると確認に気づけないので前面に出す
         this.view?.show?.(true);
       }),
     );
 
     context.subscriptions.push(
+      this.output,
       context.secrets.onDidChange((e) => { if (e.key === SECRET_KEY) void this.postState(); }),
     );
   }
@@ -114,11 +153,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       case 'setApiKey':
         if (m.key.trim()) await this.context.secrets.store(SECRET_KEY, m.key.trim());
         return this.postState();
-      case 'setUnderstand':
-        await this.context.globalState.update(UNDERSTAND_KEY, !!m.on);
-        return this.postState();
       case 'setLevel':
         await this.context.globalState.update(LEVEL_KEY, coerceLevel(m.level));
+        return this.postState();
+      case 'setTestMode':
+        await this.context.globalState.update(TEST_MODE_KEY, !!m.on);
         return this.postState();
       case 'openFile': {
         const cwd = this.cwd();
@@ -147,6 +186,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       case 'permission_response':
         this.pendingPermissions.get(m.toolCallId)?.(m.decision);
         return;
+      case 'capture_request':
+        if (!this.testMode()) return;
+        return this.post({ type: 'capture', css: await fs.readFile(path.join(this.context.extensionUri.fsPath, 'media', 'main.css'), 'utf8').catch(() => '') });
+      case 'capture_result':
+        return this.saveCapture(m.dataUrl, m.error);
     }
   }
 
@@ -159,35 +203,37 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     let provider;
     try {
-      provider = this.providers.create(CONFIG.provider, { apiKey, baseUrl: CONFIG.baseUrl });
+      provider = observeProvider(this.providers.create(CONFIG.provider, { apiKey, baseUrl: CONFIG.baseUrl }), {
+        log: (line) => this.writeLog(line),
+        confirm: (info) => this.confirmCall(info),
+      });
     } catch (e) {
       return this.onAgentEvent({ type: 'error', message: (e as Error).message });
     }
 
     const run = new AbortController();
     this.abort = run;
+    this.skipConfirm = false;
     this.transcript.push({ kind: 'user', text });
     this.post({ type: 'user', text });
     await this.postState();
 
-    // 理解モード、または取り置き中・手順の途中なら、進行役を通す
-    const session = this.understand() || this.session?.holding || this.session?.walking ? this.sessionFor(cwd) : undefined;
+    const session = this.sessionFor(cwd);
     try {
-      if (session) {
-        try {
-          await session.beginRun();
-        } catch (e) {
-          return this.onAgentEvent({ type: 'error', message: (e as Error).message });
-        }
+      try {
+        await session.beginRun();
+      } catch (e) {
+        return this.onAgentEvent({ type: 'error', message: (e as Error).message });
       }
-      this.hiding = !!session;
       this.runFailed = false;
-      // 理解モードでは、受け入れ条件が一つに決まらないときに利用者へ尋ねる道具と指示を足す
-      const instructions = [CONFIG.customInstructions, session ? ASK_INSTRUCTIONS : ''].filter((t) => t.trim()).join('\n\n');
+      this.lastAnswer = '';
+      this.calls.clear();
+      // 受け入れ条件が一つに決まらないときに利用者へ尋ねる道具と、その使い方の指示を足す
+      const instructions = [CONFIG.customInstructions, ASK_INSTRUCTIONS].filter((t) => t.trim()).join('\n\n');
 
       const agent = new Agent({
         provider,
-        tools: session ? this.toolsWithAsk() : this.tools,
+        tools: this.toolsWithAsk(),
         permissions: this.permissions,
         state: this.state,
         cwd,
@@ -199,28 +245,26 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         rgPath: this.rgPath,
         emit: (e) => this.onAgentEvent(e),
       });
-      const note = session?.takeNote();
+      const note = session.takeNote();
       await agent.run((note ? `${note}\n\n` : '') + text + ideContext(), run.signal);
 
-      if (session) {
-        // 実行を止めたあとでも、変更の取り置きは最後まで行う
-        const after = new AbortController();
-        this.abort = after;
-        this.post({ type: 'status', text: '変更を確認しています…' });
-        const system = await buildSystemPrompt({ cwd, model: CONFIG.model, customInstructions: instructions });
-        const asker = createAsker({ provider, model: CONFIG.model, reasoningEffort: CONFIG.reasoningEffort, system, messages: () => this.state.messages });
-        const started = await session
-          .endRun({ request: text, asker, level: this.level(), signal: after.signal, failed: this.runFailed })
-          .catch((e) => {
-            this.onAgentEvent({ type: 'error', message: `変更の取り置きに失敗しました: ${(e as Error).message}` });
-            return false;
-          });
-        if (!started) this.revealHeld(true);
-      }
+      // 実行を止めたあとでも、変更の取り置きは最後まで行う
+      const after = new AbortController();
+      this.abort = after;
+      this.post({ type: 'activity', text: '変更内容をまとめています…' });
+      const system = await buildSystemPrompt({ cwd, model: CONFIG.model, customInstructions: instructions });
+      const asker = createAsker({ provider, model: CONFIG.model, reasoningEffort: CONFIG.reasoningEffort, system, messages: () => this.state.messages });
+      const started = await session
+        .endRun({ request: text, asker, level: this.level(), signal: after.signal, failed: this.runFailed })
+        .catch((e) => {
+          this.onAgentEvent({ type: 'error', message: `変更をまとめられませんでした: ${(e as Error).message}` });
+          return false;
+        });
+      // 見せる手順が無い (変更も、読んだコードも無い) ときは、応答をそのまま見せる
+      if (!started) this.showAnswer();
     } finally {
-      this.hiding = false;
       this.abort = undefined;
-      this.post({ type: 'status', text: '' });
+      this.post({ type: 'activity', text: '' });
       await this.postState();
     }
   }
@@ -231,7 +275,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       state: this.state,
       rgPath: this.rgPath,
       post: (m) => this.onWalk(m),
-      status: (text) => this.post({ type: 'status', text }),
+      status: (text) => this.post({ type: 'activity', text }),
     });
     return this.session;
   }
@@ -239,9 +283,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private onWalk(message: WalkMessage): void {
     this.transcript.push({ kind: 'walk', message });
     this.post({ type: 'walk', message });
-    // たどり終えた (反映・破棄・回答の開示) ら、控えていた作業の記録を見せる
-    // 質問への回答はそのまま見せる。実装の報告は、利用者が主体の手順のあとに並べず、記録の中に入れる
-    if (message.type === 'walk_done' && message.outcome !== 'continued') this.revealHeld(message.outcome === 'read');
+    // 質問への回答は、問いをたどり終えてから見せる。実装の報告は見せない (手順そのものが説明になっている)
+    if (message.type === 'walk_done' && message.outcome === 'read') this.showAnswer();
+  }
+
+  /** 最後の応答の文章を会話に出す */
+  private showAnswer(): void {
+    const text = this.lastAnswer;
+    this.lastAnswer = '';
+    if (!text) return;
+    this.transcript.push({ kind: 'assistant', text });
+    this.post({ type: 'event', event: { type: 'assistant_end', text } });
   }
 
   /** 利用者に質問を見せて、回答を待つ (AskUser ツールから呼ばれる) */
@@ -271,99 +323,89 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     return registry;
   }
 
-  /** 控えていた作業の記録を画面に出す。showAnswer なら、最後の応答 (質問への回答) は記録の外にそのまま出す */
-  private revealHeld(showAnswer: boolean): void {
-    const items = this.heldItems;
-    this.heldItems = [];
-    this.shownTools.clear();
-    if (items.length === 0) return;
-    let answer: TranscriptItem | undefined;
-    const last = items[items.length - 1];
-    if (showAnswer && last.kind === 'assistant') answer = items.pop();
-    if (items.length > 0) {
-      this.transcript.push({ kind: 'record', items });
-      this.post({ type: 'record', items });
-    }
-    if (answer?.kind === 'assistant') {
-      this.transcript.push(answer);
-      this.post({ type: 'event', event: { type: 'assistant_end', text: answer.text } });
-    }
-  }
-
-  /** 控えているツールのうち、許可の確認が要るものは画面に出す */
-  private showHeldTool(id: string): void {
-    if (!this.hiding || this.shownTools.has(id)) return;
-    const item = this.heldItems.find((t): t is ToolItem => t.kind === 'tool' && t.id === id);
-    if (!item) return;
-    this.shownTools.add(id);
-    this.post({ type: 'event', event: { type: 'tool_start', id: item.id, name: item.name, input: item.input, summary: item.summary } });
-  }
-
-  private onAgentEvent(event: AgentEvent): void {
-    if (event.type === 'error' || event.type === 'aborted') this.runFailed = true;
-    if (this.hiding) return this.onHiddenEvent(event);
-    switch (event.type) {
-      case 'assistant_end':
-        if (event.text) this.transcript.push({ kind: 'assistant', text: event.text });
-        break;
-      case 'tool_start':
-        this.transcript.push({ kind: 'tool', id: event.id, name: event.name, input: event.input, summary: event.summary, done: false });
-        break;
-      case 'tool_end': {
-        const item = this.transcript.find((t) => t.kind === 'tool' && t.id === event.id);
-        if (item?.kind === 'tool') Object.assign(item, { output: event.output.slice(0, MAX_TRANSCRIPT_OUTPUT), isError: event.isError, done: true });
-        break;
-      }
-      case 'info':
-      case 'error':
-        this.transcript.push({ kind: event.type, text: event.message });
-        break;
-      case 'aborted':
-        this.transcript.push({ kind: 'info', text: '中断しました。' });
-        break;
-    }
-    this.post({ type: 'event', event });
-  }
-
   /**
-   * 理解モードの実行中。作業の中身 (編集内容・途中の文章・コマンドの出力) は答えを含みうるので、
-   * 記録に控えるだけにして、画面には進み具合だけを出す。
+   * エージェントのイベント。ツールの呼び出し・編集内容・途中の文章は会話に出さず、
+   * いま何をしているかだけを入力欄の上に1行で出す (中身は答えを含みうるうえ、読んでも作業の理解につながらないため)。
    */
-  private onHiddenEvent(event: AgentEvent): void {
+  private onAgentEvent(event: AgentEvent): void {
     this.session?.record(event);
     switch (event.type) {
+      case 'assistant_start':
+        this.post({ type: 'activity', text: '次の作業を考えています…' });
+        return;
       case 'assistant_end':
-        if (event.text) this.heldItems.push({ kind: 'assistant', text: event.text });
+        if (event.text.trim()) this.lastAnswer = event.text;
         return;
       case 'tool_start':
-        this.heldItems.push({ kind: 'tool', id: event.id, name: event.name, input: event.input, summary: event.summary, done: false });
-        // コマンドは、何を実行するかが見えるようにする (出力は控える)
-        if (event.name === 'Bash') this.showHeldTool(event.id);
+        this.calls.set(event.id, { name: event.name, input: event.input });
+        this.post({ type: 'activity', text: describeActivity(event.name, event.input, this.cwd() ?? '') });
         return;
       case 'tool_end': {
-        const item = this.heldItems.find((t) => t.kind === 'tool' && t.id === event.id);
-        if (item?.kind === 'tool') Object.assign(item, { output: event.output.slice(0, MAX_TRANSCRIPT_OUTPUT), isError: event.isError, done: true });
-        if (this.shownTools.has(event.id)) {
-          this.post({ type: 'event', event: { ...event, output: '' } });
-          // 失敗したコマンドは、原因 (環境の不備など) を確かめられるよう、出力を開けるようにする
-          if (event.isError) this.post({ type: 'tool_failure', id: event.id, output: event.output.slice(-MAX_TRANSCRIPT_OUTPUT) });
+        const call = this.calls.get(event.id);
+        if (call?.name === 'Bash' && event.isError) {
+          const status = event.output.trim().split('\n').pop() ?? '';
+          this.post({ type: 'activity', text: `コマンドが失敗しました: ${short(String(call.input?.command ?? ''), 40)}(${short(status, 40)})` });
         }
-        this.post({ type: 'progress', counts: this.session?.counts ?? { read: 0, search: 0, edit: 0, command: 0 } });
         return;
       }
-      case 'assistant_start':
       case 'text_delta':
       case 'done':
         return;
-      case 'info':
       case 'error':
-        this.transcript.push({ kind: event.type, text: event.message });
+        this.runFailed = true;
+        this.transcript.push({ kind: 'error', text: event.message });
+        break;
+      case 'info':
+        this.transcript.push({ kind: 'info', text: event.message });
         break;
       case 'aborted':
+        this.runFailed = true;
         this.transcript.push({ kind: 'info', text: '中断しました。' });
         break;
     }
     this.post({ type: 'event', event });
+  }
+
+  // ---- 出力パネルとテストモード ----
+
+  /** 出力パネル「GraspDev」に1行足す (時刻つき) */
+  private writeLog(line: string): void {
+    this.output.appendLine(`${new Date().toLocaleTimeString()} ${line}`);
+  }
+
+  /** テストモード: API を呼ぶ前に、目的・モデル・想定トークン数を見せて確認する */
+  private async confirmCall(info: CallInfo): Promise<boolean> {
+    if (!this.testMode() || this.skipConfirm) return true;
+    const choice = await vscode.window.showInformationMessage(
+      `API を呼び出します: ${info.purpose}`,
+      { modal: true, detail: `モデル: ${info.model}\n想定入力トークン数: 約${info.estimatedTokens.toLocaleString('en-US')}` },
+      RUN,
+      RUN_ALL,
+    );
+    if (choice === RUN_ALL) this.skipConfirm = true;
+    return choice === RUN || choice === RUN_ALL;
+  }
+
+  /** テストモード: Webview が作った会話全体の画像を、ファイルに保存する */
+  private async saveCapture(dataUrl: string | undefined, error: string | undefined): Promise<void> {
+    const m = /^data:image\/png;base64,(.+)$/.exec(dataUrl ?? '');
+    if (!m) {
+      void vscode.window.showErrorMessage(`画面を保存できませんでした: ${error ?? '画像を作れませんでした'}`);
+      return;
+    }
+    const stamp = new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15);
+    const file = path.join(this.context.globalStorageUri.fsPath, 'screenshots', `chat-${stamp}.png`);
+    try {
+      await fs.mkdir(path.dirname(file), { recursive: true });
+      await fs.writeFile(file, Buffer.from(m[1], 'base64'));
+    } catch (e) {
+      void vscode.window.showErrorMessage(`画面を保存できませんでした: ${(e as Error).message}`);
+      return;
+    }
+    const open = 'フォルダーを開く';
+    void vscode.window.showInformationMessage(`画面を保存しました: ${file}`, open).then((choice) => {
+      if (choice === open) void vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(file));
+    });
   }
 
   private async viewState(): Promise<ViewState> {
@@ -372,14 +414,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       busy: !!this.abort,
       permissionMode: this.permissionMode(),
       hasWorkspace: !!this.cwd(),
-      understand: this.understand(),
       level: this.level(),
-      holding: !!this.session?.holding,
+      testMode: this.testMode(),
     };
   }
 
   private async postInit(): Promise<void> {
     this.post({ type: 'init', state: await this.viewState(), transcript: this.transcript });
+    if (this.permissionView) this.post({ type: 'permission_request', ...this.permissionView });
   }
 
   private async postState(): Promise<void> {
@@ -396,13 +438,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     return MODES.includes(mode) ? mode : 'acceptEdits';
   }
 
-  /** 変更を取り置いて、たどり終えてから反映するか (オフにすると、従来どおりすぐファイルに書く) */
-  private understand(): boolean {
-    return this.context.globalState.get<boolean>(UNDERSTAND_KEY, CONFIG.understand);
-  }
-
   private level(): LearnerLevel {
     return coerceLevel(this.context.globalState.get<string>(LEVEL_KEY, CONFIG.level));
+  }
+
+  private testMode(): boolean {
+    return this.context.globalState.get<boolean>(TEST_MODE_KEY, false);
   }
 
   private cwd(): string | undefined {

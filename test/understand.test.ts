@@ -278,7 +278,8 @@ function lessonJson(name: string, prompt: string): unknown {
       understanding: '税率を呼び出し側から渡せるようにする',
       acceptanceCriteria: ['税率を渡すと、その税率で金額が計算される'],
       overall: 'price.ts の計算を変え、呼び出し元の cart.ts を合わせました。',
-      steps: stepIds.map((id) => ({ id, label: `${id} の変更`, why: '税率を固定値から引数に変えるため amount * (1 + rate) にする。', criterion: 1, contract: 'calcPrice の引数が増える' })),
+      verification: 'ファイルを作るコマンドを実行しただけで、テストは実行していない。',
+      steps: stepIds.map((id) => ({ id, label: `${id} の変更`, why: '税率を固定値から引数に変える。そのため amount * (1 + rate) にする。', criterion: 1, contract: 'calcPrice の引数が増える' })),
       sites: siteIds.map((id) => ({ id, reason: '読んで確かめた' })),
     };
   }
@@ -359,12 +360,18 @@ test('実装の依頼: 変更を取り置き、確定したコードから問い
   assert.deepEqual([...item.blanks[0].options].sort(), ['(1 + rate)', '(1 - rate)', '(2 + rate)', '(amount + rate)']);
   const beforeAnswer = JSON.stringify({ ...step1.view, item: { ...item, blanks: item.blanks.map((b: any) => ({ ...b, options: [] })) } });
   assert.ok(!beforeAnswer.includes('1 + rate'), '答える前の文章に答えが含まれている');
+  // 答えを先に言っている文は、伏せ字にせず、その文だけを除く (理由のほかの文は残る)
+  assert.equal(step1.view.why, '受け入れ条件 1「税率を渡すと、その税率で金額が計算される」を満たすため。\n税率を固定値から引数に変える。');
+  assert.deepEqual(item.blanks[0].hints, ['元の金額に税の分を足す']);
+  assert.ok(!/〇|○/.test(JSON.stringify(posted)));
   // 誤答が違う理由は、最後の手がかり (選択肢を1つ消す) の1件だけが渡る
   assert.equal(beforeAnswer.split('whyWrong').length, 1);
   assert.equal(item.blanks[0].options[item.blanks[0].eliminate.index] !== '(1 + rate)', true);
   assert.deepEqual(item.refs, [{ path: 'src/cart.ts', line: 6, note: '呼び出し元' }]);
-  assert.equal(step1.view.question.multi, true);
+  // 影響の予想は、実際に変更が必要になった場所だけを答えにする (変更不要・未確認の場所は選択肢に入れない)
+  assert.equal(step1.view.question.multi, false);
   assert.ok(step1.view.question.options.includes('src/cart.ts の cartTotal'));
+  assert.ok(!step1.view.question.options.some((o: string) => /reportLine|legacyTotal/.test(o)));
 
   // 誤答を選ぶ → 選んだ誤答が違う理由と、影響の追い方が示される
   const wrong = item.blanks[0].options.indexOf('(1 - rate)');
@@ -373,14 +380,16 @@ test('実装の依頼: 変更を取り置き、確定したコードから問い
   assert.equal(reveal.type, 'walk_reveal');
   const correctIndex = item.blanks[0].options.indexOf('(1 + rate)');
   assert.deepEqual(reveal.view.blanks, [{ correct: false, answer: '(1 + rate)', chosen: wrong, correctIndex, why: '税率を足した倍率を掛ける', note: '値引きになる' }]);
-  assert.equal(reveal.view.question.correct, false);
+  assert.equal(reveal.view.question.correct, true);
+  // 答え合わせのあとは、理由の全文を見せる
   assert.match(reveal.view.why, /amount \* \(1 \+ rate\)/);
-  const results = reveal.view.checks[0].results;
-  assert.deepEqual(results.map((r: any) => [r.label, r.verdict, r.reason]), [
+  const check = reveal.view.checks[0];
+  assert.deepEqual(check.results.map((r: any) => [r.label, r.verdict, r.reason]), [
     ['src/cart.ts の cartTotal', 'changed', '読んで確かめた'],
     ['src/report.ts の reportLine', 'checked', '読んで確かめた'],
-    ['src/unused.ts の legacyTotal', 'unseen', ''],
   ]);
+  // 作業の中で読まれなかった場所は、判断を付けずに一覧だけを添える
+  assert.deepEqual(check.others.map((r: any) => r.label), ['src/unused.ts の legacyTotal']);
 
   // 答え合わせの前には次へ進めない。問いにできなかったステップは差分と理由をそのまま示す
   session.next();
@@ -398,14 +407,21 @@ test('実装の依頼: 変更を取り置き、確定したコードから問い
   const final = posted[posted.length - 1] as any;
   assert.equal(final.type, 'walk_final');
   assert.deepEqual(final.view.files.map((f: any) => [f.path, f.added, f.removed]), [['gen.txt', 1, 0], ['src/cart.ts', 1, 1], ['src/price.ts', 2, 2]]);
-  assert.deepEqual(final.view.unseen.map((u: any) => u.label), ['src/unused.ts の legacyTotal']);
-  assert.deepEqual(final.view.commands, [{ command: 'echo generated > gen.txt', ok: true }]);
+  assert.deepEqual(final.view.criteria, [{ text: '税率を渡すと、その税率で金額が計算される', steps: [1, 2, 3] }]);
+  assert.deepEqual(final.view.steps.map((s: any) => [s.number, s.files, s.origin]), [
+    [1, ['src/price.ts'], '条件1のため'],
+    [2, ['src/cart.ts'], 'ステップ1に合わせる'],
+    [3, ['gen.txt'], '条件1のため'],
+  ]);
+  assert.equal(final.view.verification, 'ファイルを作るコマンドを実行しただけで、テストは実行していない。');
+  assert.deepEqual(final.view.commands, [{ command: 'echo generated > gen.txt', description: '', ok: true }]);
+  assert.equal(final.view.unseen, undefined);
 
   // 理解のための問い合わせは、エージェントの会話を書き換えない
   assert.equal(historyBefore(), history);
   assert.deepEqual(provider.asked.sort(), ['change_interview', 'leak_fix', 'step_quiz', 'step_quiz', 'voice_fix']);
   // 「〜しました」という報告の形は、これから実装する手順としての言い方に直される
-  assert.match(final.view.overall, /呼び出し元の cart\.ts を合わせる。/);
+  assert.equal(final.view.overall, 'price.ts の計算を変え、呼び出し元の cart.ts を合わせる。');
   assert.ok(!/しました/.test(JSON.stringify(posted)));
 
   await session.apply();

@@ -8,12 +8,10 @@
   const statusEl = $('status');
   const MAX_SHOWN_OUTPUT = 8000;
 
-  let state = { hasKey: true, busy: false, permissionMode: 'acceptEdits', hasWorkspace: true, understand: true, level: 'intermediate', holding: false };
-  let statusNote = ''; // ホストから届いた進み具合の文
-  let progress = null; // 理解モードの実行中に出す、ツールの回数
+  let state = { hasKey: true, busy: false, permissionMode: 'acceptEdits', hasWorkspace: true, level: 'intermediate', testMode: false };
+  let activity = ''; // いま行っている作業 (ホストから届く1行の文)
   let settingsOpen = false;
   let streaming = null; // { el, text, scheduled }
-  const toolEls = new Map();
 
   // ---------- markdown ----------
   const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -93,11 +91,10 @@
   function nearBottom() {
     return messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 80;
   }
-  let container = null; // 作業の記録など、まとめて入れる先 (無ければ会話の末尾)
   function append(node) {
     const stick = nearBottom();
-    (container || messagesEl).appendChild(node);
-    if (stick && !container) messagesEl.scrollTop = messagesEl.scrollHeight;
+    messagesEl.appendChild(node);
+    if (stick) messagesEl.scrollTop = messagesEl.scrollHeight;
     return node;
   }
 
@@ -116,126 +113,54 @@
     append(e);
   }
 
-  function clip(s) {
-    s = String(s ?? '');
-    return s.length > MAX_SHOWN_OUTPUT ? s.slice(0, MAX_SHOWN_OUTPUT) + `\n… (残り ${s.length - MAX_SHOWN_OUTPUT} 文字は省略)` : s;
-  }
-  function diffHtml(oldStr, newStr) {
-    const rows = (s, sign, cls) => (s ? String(s).split('\n').map((l) => `<div class="${cls}">${sign} ${esc(l)}</div>`).join('') : '');
-    return `<div class="diff">${rows(oldStr, '-', 'del')}${rows(newStr, '+', 'add')}</div>`;
-  }
-  function toolInputHtml(name, input) {
-    input = input && typeof input === 'object' ? input : {};
-    if (name === 'Edit') return diffHtml(input.old_string, clip(input.new_string));
-    if (name === 'Write') return diffHtml('', clip(input.content));
-    if (name === 'Bash') return `<pre class="cmd">$ ${esc(input.command ?? '')}</pre>`;
-    if (name === 'TodoWrite' && Array.isArray(input.todos)) {
-      return '<div class="todos">' + input.todos.map((t) => {
-        const mark = t.status === 'completed' ? '☑' : t.status === 'in_progress' ? '▶' : '☐';
-        return `<div class="todo ${esc(t.status)}">${mark} ${esc(t.content)}</div>`;
-      }).join('') + '</div>';
+  // ---------- 許可の確認 (入力欄の上) ----------
+  // コマンドや編集の呼び出しは会話に出さない。許可が要るときだけ、ここで尋ねる
+  const permEl = $('permission');
+  let permId = '';
+
+  function showPermission(m) {
+    permId = m.toolCallId;
+    permEl.innerHTML = '';
+    const text = el('div', 'ptext');
+    text.textContent = m.title;
+    permEl.appendChild(text);
+    if (m.detail) {
+      const pre = el('pre', 'pdetail');
+      pre.textContent = m.detail;
+      permEl.appendChild(pre);
     }
-    if (name === 'Read' || name === 'Glob' || name === 'Grep') return '';
-    return `<pre>${esc(JSON.stringify(input, null, 2))}</pre>`;
-  }
-
-  function addTool(item) {
-    const box = el('details', 'tool');
-    box.dataset.name = item.name;
-    const hasPath = ['Read', 'Edit', 'Write'].includes(item.name) && item.input && item.input.file_path;
-    const sum = el('summary', '', `<span class="dot"></span><span class="tname">${esc(item.name)}</span><span class="tsum${hasPath ? ' link' : ''}">${esc(item.summary || '')}</span>`);
-    if (hasPath) {
-      sum.querySelector('.tsum').addEventListener('click', (e) => {
-        e.preventDefault();
-        vscode.postMessage({ type: 'openFile', path: item.input.file_path });
-      });
-    }
-    box.appendChild(sum);
-    const body = el('div', 'tbody', toolInputHtml(item.name, item.input));
-    box.appendChild(body);
-    if (item.name === 'TodoWrite' || item.name === 'Edit' || item.name === 'Write') box.open = true;
-    toolEls.set(item.id, box);
-    append(box);
-    if (item.done) finishTool(item.id, item.output, item.isError);
-    return box;
-  }
-
-  function finishTool(id, output, isError) {
-    const box = toolEls.get(id);
-    if (!box) return;
-    box.classList.add(isError ? 'error' : 'ok');
-    box.querySelector('.perm')?.remove();
-    // TodoWrite の結果はモデル向けの定型文なので表示しない
-    if (output && !box.querySelector('.tout') && !(box.dataset.name === 'TodoWrite' && !isError)) {
-      const pre = el('pre', 'tout');
-      pre.textContent = clip(output);
-      box.querySelector('.tbody').appendChild(pre);
-    }
-  }
-
-  /** 失敗したコマンドの出力。変更内容を含むことがあるので、開いたときだけ見せる */
-  function addFailure(id, output) {
-    const box = toolEls.get(id);
-    if (!box || box.querySelector('.tfail')) return;
-    const lines = String(output || '').trim().split('\n');
-    const status = lines[lines.length - 1] || '';
-    const d = el('details', 'tfail');
-    d.appendChild(el('summary', '', `失敗しました(${esc(status)})。出力を見る — 変更内容が含まれることがあります`));
-    const pre = el('pre', 'tout');
-    pre.textContent = clip(output);
-    d.appendChild(pre);
-    box.querySelector('.tbody').appendChild(d);
-    box.open = true;
-  }
-
-  function showPermission(toolCallId, key) {
-    const box = toolEls.get(toolCallId);
-    if (!box) return;
-    box.open = true;
-    const perm = el('div', 'perm', `<div class="ptext">このツールの実行を許可しますか?</div>`);
+    const row = el('div', 'prow');
     const respond = (behavior) => {
-      perm.remove();
-      updateStatus();
-      vscode.postMessage({ type: 'permission_response', toolCallId, decision: { behavior } });
+      hidePermission(m.toolCallId);
+      vscode.postMessage({ type: 'permission_response', toolCallId: m.toolCallId, decision: { behavior } });
     };
     const btn = (label, behavior, cls) => {
       const b = el('button', cls);
       b.textContent = label;
       b.addEventListener('click', () => respond(behavior));
-      perm.appendChild(b);
+      row.appendChild(b);
     };
     btn('許可', 'allow', 'primary');
-    btn(`このセッション中は常に許可: ${key}`, 'always', 'secondary');
+    btn('今後も許可', 'always', 'secondary');
     btn('拒否', 'deny', 'secondary');
-    box.appendChild(perm);
-    box.scrollIntoView({ block: 'nearest' });
+    permEl.appendChild(row);
+    permEl.hidden = false;
+    updateStatus();
+  }
+  function hidePermission(id) {
+    if (id && id !== permId) return;
+    permId = '';
+    permEl.hidden = true;
+    permEl.innerHTML = '';
     updateStatus();
   }
 
   function renderItem(item) {
     if (item.kind === 'user') addUser(item.text);
     else if (item.kind === 'assistant') addAssistant(item.text);
-    else if (item.kind === 'tool') addTool(item);
     else if (item.kind === 'walk') onWalk(item.message);
     else if (item.kind === 'ask') addAsk(item);
-    else if (item.kind === 'record') addRecord(item.items);
     else addNote(item.kind, item.text);
-  }
-
-  /** 手順をたどり終えてから見せる、作業の記録 (折りたたみ) */
-  function addRecord(items) {
-    const box = el('details', 'record');
-    box.appendChild(el('summary', '', `作業の記録(${items.length}件)`));
-    const body = el('div', 'rbody');
-    box.appendChild(body);
-    append(box);
-    container = body;
-    try {
-      // 実行中に出したコマンドのカードとは別に、出力つきで並べ直す
-      items.forEach((item) => (item.kind === 'tool' ? addTool({ ...item, id: 'rec:' + item.id }) : renderItem(item)));
-    } finally {
-      container = null;
-    }
   }
 
   // ---------- 実装の前に決めること ----------
@@ -308,7 +233,7 @@
 
   // ---------- たどる手順 ----------
   const BLANK = '___BLANK___';
-  const VERDICT = { changed: '変更が必要', checked: '変更は不要', unseen: '未確認' };
+  const VERDICT = { changed: '変更が必要', checked: '変更は不要' };
   const walks = new Map(); // walk の番号 → { el, kind, steps: Map(index → stepState) }
 
   function fileLink(path, line, text) {
@@ -387,7 +312,7 @@
     const box = el('div', 'qblank');
     const head = el('div', 'qhead', `<span class="qno">［${k + 1}］</span><span class="concept">${esc(b.concept)}</span>`);
     const hintBtn = el('button', 'link');
-    hintBtn.textContent = '手がかり';
+    hintBtn.textContent = 'ヒントを見る';
     head.appendChild(hintBtn);
     box.appendChild(head);
     const opts = el('div', 'qopts');
@@ -496,7 +421,7 @@
     (v.diffs || []).forEach((d) => card.appendChild(diffBlock(d)));
     if (v.question) {
       const q = v.question;
-      const sec = section('影響はどこに及ぶか');
+      const sec = section('この変更の影響');
       sec.appendChild(textBlock('', q.prompt));
       const opts = el('div', 'qopts col');
       q.options.forEach((label, i) => {
@@ -516,7 +441,7 @@
       sec.appendChild(opts);
       if (q.hint) {
         const hintBtn = el('button', 'link');
-        hintBtn.textContent = '探し方の手がかり';
+        hintBtn.textContent = '探し方のヒントを見る';
         hintBtn.addEventListener('click', () => { sec.appendChild(textBlock('hint', q.hint)); hintBtn.remove(); });
         sec.appendChild(hintBtn);
       }
@@ -583,8 +508,8 @@
         if (r.question.correctIndexes.includes(i)) o.classList.add('ok');
         else if (r.question.chosen.includes(i)) o.classList.add('attn');
       });
-      const names = r.question.correctIndexes.map((i) => st.view.question.options[i]).join('、');
-      st.nextEl.after(textBlock('qres ' + (r.question.correct ? 'ok' : 'attn'), r.question.correct ? '✓ 合っています' : `確認が必要になるのは: ${names}`));
+      // どれが該当するかは選択肢の色で示す (違っていたときに、同じ内容を文章で繰り返さない)
+      if (r.question.correct) st.nextEl.after(textBlock('qres ok', '✓ 合っています'));
     }
     if (r.explanation) {
       const sec = section(w.kind === 'reading' ? 'このコードの役割' : 'この変更の役割');
@@ -597,20 +522,31 @@
       st.reveal.appendChild(sec);
     }
     if ((r.checks || []).length) {
-      const sec = section('判断と根拠(影響の追い方)');
+      // 影響の確認: この変更で変わったものを使っている場所と、それぞれ変更が要るかどうか
+      const sec = section('影響の確認');
       r.checks.forEach((c) => {
         const box = el('div', 'check');
-        box.appendChild(el('div', 'chead', `<strong>${esc(c.pattern)}</strong> — <code>${esc(c.subject)}</code>`));
-        box.appendChild(textBlock('small', `きっかけ: ${c.trigger}\n探し方: ${c.howToFind}\n判断基準: ${c.criterion}`));
+        box.appendChild(el('div', 'chead', `<code>${esc(c.subject)}</code> を使っている場所 <span class="tag">${esc(c.pattern)}</span>`));
+        box.appendChild(textBlock('small', `見るところ: ${c.criterion}`));
         c.results.forEach((p) => {
           const row = el('div', 'site ' + p.verdict);
           row.appendChild(el('span', 'badge', esc(VERDICT[p.verdict] + (p.step ? ` → ステップ${p.step}` : ''))));
           row.appendChild(fileLink(p.path, p.line, p.label));
           if (p.reason) row.appendChild(textBlock('small', p.reason));
-          else if (p.verdict === 'unseen') row.appendChild(textBlock('small', '作業の中で読まれていません。必要なら自分で確かめてください。'));
           box.appendChild(row);
         });
-        if (c.more > 0) box.appendChild(textBlock('small', `ほかに${c.more}か所あります。`));
+        const rest = (c.others || []).length + (c.more || 0);
+        if (rest > 0) {
+          // 作業の中で読まれなかった場所は、判断が無いので、控えめに一覧だけを添える
+          const d = el('details', 'others');
+          d.appendChild(el('summary', '', `ほかに、同じ名前が出てくる場所が${rest}か所あります`));
+          (c.others || []).forEach((p) => {
+            const row = el('div', 'site');
+            row.appendChild(fileLink(p.path, p.line, p.label));
+            d.appendChild(row);
+          });
+          box.appendChild(d);
+        }
         sec.appendChild(box);
       });
       st.reveal.appendChild(sec);
@@ -618,7 +554,9 @@
     const next = el('button', 'primary wnext');
     next.textContent = r.last ? (w.kind === 'reading' ? '回答を見る' : '変更の全体像へ') : w.kind === 'reading' ? '次の読みどころへ' : '次のステップへ';
     next.addEventListener('click', () => { next.disabled = true; vscode.postMessage({ type: 'walk_next' }); });
-    st.actions.appendChild(next);
+    const after = el('div', 'wactions');
+    after.appendChild(next);
+    st.card.appendChild(after);
   }
 
   function addFinal(w, f) {
@@ -626,6 +564,36 @@
     card.appendChild(textBlock('wlabel', '変更の全体像'));
     if (f.notice) card.appendChild(textBlock('attn', f.notice));
     if (f.overall) card.appendChild(textBlock('', f.overall));
+
+    if (f.criteria.length) {
+      const sec = section('受け入れ条件');
+      f.criteria.forEach((c, i) => {
+        const row = el('div', 'crow');
+        row.appendChild(el('span', 'mno', `${i + 1}.`));
+        row.appendChild(textBlock('', c.text));
+        if (c.steps.length) row.appendChild(el('span', 'tag', esc('ステップ ' + c.steps.join('・'))));
+        sec.appendChild(row);
+      });
+      card.appendChild(sec);
+    }
+
+    if (f.steps.length) {
+      const sec = section('たどった手順');
+      f.steps.forEach((s) => {
+        const row = el('div', 'srow');
+        row.appendChild(el('span', 'mno', `${s.number}.`));
+        const body = el('div', 'sbody');
+        body.appendChild(textBlock('stitle', s.label));
+        const meta = el('div', 'smeta');
+        s.files.forEach((p) => meta.appendChild(fileLink(p)));
+        if (s.origin) meta.appendChild(el('span', 'tag', esc(s.origin)));
+        body.appendChild(meta);
+        row.appendChild(body);
+        sec.appendChild(row);
+      });
+      card.appendChild(sec);
+    }
+
     const files = section('反映するファイル');
     f.files.forEach((x) => {
       const row = el('div', 'frow');
@@ -640,25 +608,28 @@
       }
     });
     card.appendChild(files);
-    const ran = section('動作確認に実行したコマンド');
-    if (f.commands.length) f.commands.forEach((c) => ran.appendChild(el('div', 'cmdrow ' + (c.ok ? 'ok' : 'attn'), `${c.ok ? '✓' : '!'} <code>${esc(c.command)}</code>`)));
-    else ran.appendChild(textBlock('small', 'テストやビルドなどのコマンドは実行されていません。'));
-    card.appendChild(ran);
-    if (f.unseen.length || f.unseenMore) {
-      const sec = section('確かめられていない場所');
-      sec.appendChild(textBlock('small', '変更の影響が及びうるのに、作業の中で読まれなかった場所です。反映の前後に確かめてください。'));
-      f.unseen.forEach((u) => {
-        const row = el('div', 'site unseen');
-        row.appendChild(fileLink(u.path, u.line, u.label));
-        row.appendChild(textBlock('small', `${u.pattern}(${u.subject})`));
-        sec.appendChild(row);
+
+    // 動作確認: 何をどこまで確かめてあるかを文章で示し、実行したコマンドは結果とともに添える
+    const ran = section('動作確認');
+    if (f.verification) ran.appendChild(textBlock('', f.verification));
+    if (f.commands.length) {
+      f.commands.forEach((c) => {
+        const row = el('div', 'cmdrow');
+        row.appendChild(el('span', 'badge ' + (c.ok ? 'ok' : 'ng'), c.ok ? '成功' : '失敗'));
+        const body = el('div', 'sbody');
+        if (c.description) body.appendChild(textBlock('', c.description));
+        body.appendChild(el('code', '', esc(c.command)));
+        row.appendChild(body);
+        ran.appendChild(row);
       });
-      if (f.unseenMore) sec.appendChild(textBlock('small', `ほかに${f.unseenMore}か所あります。`));
-      card.appendChild(sec);
+    } else if (!f.verification) {
+      ran.appendChild(textBlock('small', 'テストやビルドは実行されていません。反映したあとに、テストを実行して動作を確かめてください。'));
     }
+    card.appendChild(ran);
+
     if (f.unheld.length) {
-      const sec = section('取り置けなかったファイル');
-      sec.appendChild(textBlock('small', 'バイナリなど、内容を控えられなかったファイルです。すでに書き換わっています: ' + f.unheld.join('、')));
+      const sec = section('すでに書き換わっているファイル');
+      sec.appendChild(textBlock('small', '画像などのファイルは、この画面から反映・破棄ができません: ' + f.unheld.join('、')));
       card.appendChild(sec);
     }
     const actions = el('div', 'wactions');
@@ -752,12 +723,6 @@
         } else if (ev.text) addAssistant(ev.text);
         streaming = null;
         break;
-      case 'tool_start':
-        addTool({ ...ev, done: false });
-        break;
-      case 'tool_end':
-        finishTool(ev.id, ev.output, ev.isError);
-        break;
       case 'usage':
         $('meta').textContent = `${(ev.usage.inputTokens / 1000).toFixed(1)}k tokens`;
         break;
@@ -773,10 +738,8 @@
   }
 
   function updateStatus() {
-    const waiting = !!document.querySelector('.perm');
     statusEl.hidden = !state.busy;
-    const counts = progress ? `(読み取り ${progress.read}・検索 ${progress.search}・編集 ${progress.edit}・実行 ${progress.command})` : '';
-    $('statusText').textContent = waiting ? '許可を待っています…' : statusNote || `作業中…${counts}`;
+    $('statusText').textContent = permId ? '許可を待っています…' : activity || '作業中…';
   }
 
   function applyState(s) {
@@ -789,14 +752,76 @@
     sendEl.textContent = s.busy ? '停止' : '送信';
     sendEl.classList.toggle('stop', s.busy);
     $('mode').value = s.permissionMode;
-    $('understand').checked = s.understand;
     $('level').value = s.level;
-    if (!s.busy) { progress = null; statusNote = ''; }
+    $('testMode').checked = s.testMode;
+    $('capture').hidden = !s.testMode;
+    if (!s.busy) activity = '';
     inputEl.disabled = !s.hasKey || !s.hasWorkspace;
     inputEl.placeholder = !s.hasWorkspace
       ? 'フォルダを開くと利用できます'
       : '質問や実装の指示を入力… (Shift+Enterで改行)';
     updateStatus();
+  }
+
+  // ---------- 画面の保存 (テストモード) ----------
+  /**
+   * 会話の全体 (スクロールで隠れている部分も含む) と入力欄を、1枚の画像にしてホストへ渡す。
+   * 画面の複製を SVG の foreignObject に入れて描く。スタイルシートは Webview から読めないので、ホストから本文を受け取る。
+   */
+  async function capture(css) {
+    try {
+      const width = document.documentElement.clientWidth;
+      const height = document.body.clientHeight - messagesEl.clientHeight + messagesEl.scrollHeight;
+      // 複製はページに挿さず、文字列として組み立てる (配色の変数は、VS Code が html 要素に付けているものを引き継ぐ)
+      const extra = `
+        .capture-root { display: flex; flex-direction: column; box-sizing: border-box; color: var(--vscode-foreground); font-family: var(--vscode-font-family); font-size: var(--vscode-font-size); line-height: 1.5;
+          background: var(--vscode-sideBar-background, var(--vscode-editor-background, #1f1f1f)); }
+        .capture-root #messages { overflow: visible; flex: none; }
+        .capture-root .qcode, .capture-root pre, .capture-root .diff { overflow: hidden; max-height: none; }
+        .capture-root * { animation: none !important; }`;
+      const style = document.createElement('style');
+      style.textContent = css + extra;
+      const serializer = new XMLSerializer();
+      const parts = [serializer.serializeToString(style)];
+      const live = [...document.body.querySelectorAll('input, textarea, select')];
+      for (const child of document.body.children) {
+        if (child.tagName === 'SCRIPT') continue;
+        const clone = child.cloneNode(true);
+        // 入力中の内容は属性に無いので、複製に写す
+        const originals = [...child.querySelectorAll('input, textarea, select')];
+        clone.querySelectorAll('input, textarea, select').forEach((node, i) => {
+          const from = originals[i];
+          if (!from || !live.includes(from)) return;
+          if (node.tagName === 'TEXTAREA') node.textContent = from.value;
+          else if (node.tagName === 'SELECT') [...node.options].forEach((o, k) => (k === from.selectedIndex ? o.setAttribute('selected', '') : o.removeAttribute('selected')));
+          else if (from.type === 'checkbox') from.checked ? node.setAttribute('checked', '') : node.removeAttribute('checked');
+          else if (from.type !== 'password') node.setAttribute('value', from.value);
+        });
+        parts.push(serializer.serializeToString(clone));
+      }
+      const now = getComputedStyle(document.body);
+      const bg = [now.backgroundColor, getComputedStyle(document.documentElement).backgroundColor].find((c) => c && c !== 'rgba(0, 0, 0, 0)' && c !== 'transparent') || '#1f1f1f';
+      const vars = esc(`${document.documentElement.getAttribute('style') || ''};color:${now.color};font-family:${now.fontFamily};font-size:${now.fontSize};background:${bg}`);
+      const xhtml = `<div xmlns="http://www.w3.org/1999/xhtml" class="capture-root" style="${vars};width:${width}px;height:${height}px;">${parts.join('')}</div>`;
+      const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}"><foreignObject x="0" y="0" width="100%" height="100%">${xhtml}</foreignObject></svg>`;
+      const img = new Image();
+      await new Promise((resolve, reject) => {
+        img.onload = resolve;
+        img.onerror = () => reject(new Error('画像を描けませんでした'));
+        img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+      });
+      // 長い会話でも描けるよう、キャンバスの上限に合わせて倍率を下げる
+      const scale = Math.max(0.25, Math.min(2, 16000 / height));
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.round(width * scale);
+      canvas.height = Math.round(height * scale);
+      const ctx = canvas.getContext('2d');
+      ctx.scale(scale, scale);
+      ctx.drawImage(img, 0, 0);
+      vscode.postMessage({ type: 'capture_result', dataUrl: canvas.toDataURL('image/png') });
+    } catch (e) {
+      vscode.postMessage({ type: 'capture_result', error: String((e && e.message) || e) });
+    }
   }
 
   // ---------- input ----------
@@ -822,7 +847,8 @@
   });
   sendEl.addEventListener('click', submit);
   $('mode').addEventListener('change', (e) => vscode.postMessage({ type: 'setMode', mode: e.target.value }));
-  $('understand').addEventListener('change', (e) => vscode.postMessage({ type: 'setUnderstand', on: e.target.checked }));
+  $('testMode').addEventListener('change', (e) => vscode.postMessage({ type: 'setTestMode', on: e.target.checked }));
+  $('capture').addEventListener('click', () => vscode.postMessage({ type: 'capture_request' }));
   $('level').addEventListener('change', (e) => vscode.postMessage({ type: 'setLevel', level: e.target.value }));
   const saveKey = () => {
     const key = $('keyInput').value.trim();
@@ -839,7 +865,7 @@
     switch (m.type) {
       case 'init':
         messagesEl.innerHTML = '';
-        toolEls.clear();
+        hidePermission();
         walks.clear();
         askEls.clear();
         streaming = null;
@@ -859,12 +885,10 @@
       case 'walk': onWalk(m.message); break;
       case 'ask': addAsk(m); break;
       case 'ask_cancel': askEls.get(m.id)?.querySelectorAll('button, input').forEach((x) => (x.disabled = true)); break;
-      case 'tool_failure': addFailure(m.id, m.output); break;
-      case 'record': addRecord(m.items); break;
-      case 'progress': progress = m.counts; updateStatus(); break;
-      case 'status': statusNote = m.text; updateStatus(); break;
-      case 'permission_request': showPermission(m.toolCallId, m.key); break;
-      case 'permission_cancel': toolEls.get(m.toolCallId)?.querySelector('.perm')?.remove(); updateStatus(); break;
+      case 'activity': activity = m.text; updateStatus(); break;
+      case 'capture': capture(m.css); break;
+      case 'permission_request': showPermission(m); break;
+      case 'permission_cancel': hidePermission(m.toolCallId); break;
     }
   });
 
