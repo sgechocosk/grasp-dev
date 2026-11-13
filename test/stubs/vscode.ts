@@ -14,6 +14,9 @@ export const Uri = {
 export const output: string[] = [];
 export const dialogs: Array<{ message: string; detail?: string; items: string[] }> = [];
 export const answers: Array<string | undefined> = [];
+/** 保存ダイアログへの答え (選んだパス。undefined は取り消し) と、開いたときの初期位置 */
+export const saveAnswers: Array<string | undefined> = [];
+export const saveDialogs: Array<{ defaultPath?: string; filters?: Record<string, string[]> }> = [];
 
 export const window = {
   activeTextEditor: undefined,
@@ -25,6 +28,11 @@ export const window = {
     return answers.shift();
   },
   showErrorMessage: async (message: string) => void dialogs.push({ message, items: [] }),
+  showSaveDialog: async (options: { defaultUri?: { fsPath: string }; filters?: Record<string, string[]> }) => {
+    saveDialogs.push({ defaultPath: options.defaultUri?.fsPath, filters: options.filters });
+    const picked = saveAnswers.shift();
+    return picked === undefined ? undefined : Uri.file(picked);
+  },
 };
 
 export const workspace = {
