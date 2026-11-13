@@ -260,6 +260,11 @@ export function analyzeImpact(steps: Step[], changes: FileChange[], view: Worksp
   return obligations;
 }
 
+/** その確認先を探すのに使った、名前・キーの出現のパターン */
+export function subjectPattern(o: Pick<Obligation, 'pattern' | 'subject'>): RegExp {
+  return o.pattern === 'keys' ? quotedLiteralPattern(o.subject) : wordRe(o.subject);
+}
+
 export function placeLabel(site: Pick<Site, 'path' | 'symbol'>): string {
   return site.symbol ? `${site.path} の ${site.symbol}` : site.path;
 }

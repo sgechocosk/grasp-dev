@@ -61,7 +61,10 @@ export type WebviewMessage =
   | { type: 'setLevel'; level: string }
   | { type: 'setTestMode'; on: boolean }
   | { type: 'openFile'; path: string; line?: number }
-  | { type: 'walk_answer'; index: number; blanks: number[]; next: number[] }
+  /** 問いへの答え。番号は選択肢の位置 (-2 は「わからない」)。review は、場所ごとの判断 */
+  | { type: 'walk_answer'; index: number; blanks: number[]; next: number[]; nextUnknown?: boolean; review?: number[] }
+  /** まとめ (仕組みの説明の空欄) への答え */
+  | { type: 'walk_recap_answer'; picks: number[] }
   | { type: 'walk_next' }
   | { type: 'ask_response'; id: string; answers: string[] }
   | { type: 'walk_apply' }

@@ -174,7 +174,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         this.pendingAsks.get(m.id)?.(Array.isArray(m.answers) ? m.answers.map(String) : []);
         return;
       case 'walk_answer':
-        this.session?.answer(m.index, { blanks: m.blanks, next: m.next });
+        this.session?.answer(m.index, { blanks: m.blanks, next: m.next, nextUnknown: m.nextUnknown, review: m.review });
+        return;
+      case 'walk_recap_answer':
+        this.session?.answerRecap(m.picks);
         return;
       case 'walk_next':
         this.session?.next();

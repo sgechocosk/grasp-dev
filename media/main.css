@@ -221,3 +221,29 @@ input.other {
 .cmdrow .badge { flex: none; }
 .cmdrow code { overflow-wrap: anywhere; }
 #capture { font-size: 0.92em; padding: 2px 8px; }
+
+/* ---------- 問いの形 (レベルごと) ・まとめ ---------- */
+/* どの条件・どのステップのための変更かを示す札 */
+.tag.origin { background: none; color: var(--vscode-foreground); border: 1px solid var(--vscode-widget-border, rgba(128,128,128,.55)); }
+/* 「わからない」: 選択肢と区別がつくよう、控えめに置く */
+button.opt.unknown { font-family: inherit; border-style: dashed; background: none; opacity: 0.85; }
+button.opt.unknown.sel { color: var(--vscode-button-foreground); background: var(--vscode-button-background); opacity: 1; }
+button.opt.plain { font-family: inherit; }
+.qhead .qask { font-weight: 600; }
+.qhead:has(.qask) { align-items: baseline; }
+.qhead button.link { white-space: nowrap; flex: none; }
+.linecode {
+  font-family: var(--vscode-editor-font-family, monospace); font-size: 0.95em; white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.site .linecode, .rsite .linecode { flex-basis: 100%; padding: 2px 8px; border-radius: 4px; background: var(--vscode-textCodeBlock-background); }
+.check .site .linecode { background: var(--vscode-editor-background); }
+.rsite {
+  display: flex; flex-direction: column; gap: 4px; padding: 6px 8px; border-radius: 4px;
+  border: 1px solid var(--vscode-widget-border, rgba(128,128,128,.35));
+}
+.chead .small { font-size: 0.92em; opacity: 0.8; }
+details.more { display: flex; flex-direction: column; }
+details.more > summary { cursor: pointer; font-size: 0.92em; color: var(--vscode-textLink-foreground); }
+details.more > * + * { margin-top: 6px; }
+.rtext { line-height: 1.9; }
+.rtext .blank { font-family: var(--vscode-editor-font-family, monospace); font-size: 0.95em; }
