@@ -75,7 +75,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   /** 利用者の回答を待っている質問 */
   private pendingAsks = new Map<string, (answers: string[] | undefined) => void>();
   private askCount = 0;
-  /** 出力パネル「GraspDev」: API を呼ぶたびの記録 (モデル・入出力トークン数・キャッシュ) */
+  /** 出力パネル「GraspDev」: OpenAI API を呼ぶたびの記録 (モデル・入出力トークン数・キャッシュ)。ツールの使用は記録しない */
   private readonly output = vscode.window.createOutputChannel('GraspDev');
   /** テストモードで「この処理では以降確認しない」を選んだか (依頼ごとに戻す) */
   private skipConfirm = false;
@@ -345,11 +345,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         if (call?.name === 'Bash' && event.isError) {
           const status = event.output.trim().split('\n').pop() ?? '';
           this.post({ type: 'activity', text: `コマンドが失敗しました: ${short(String(call.input?.command ?? ''), 40)}(${short(status, 40)})` });
-        }
-        // テストモードでは、会話に出さない代わりに、出力パネルに呼び出しを残す
-        if (call && this.testMode()) {
-          const what = describeActivity(call.name, call.input, this.cwd() ?? '').replace(/(を読んでいます|を検索しています|を探しています|を書き換えています|を実行しています)/, '');
-          this.writeLog(`ツール ${call.name} ${what} → ${event.isError ? `失敗\n${event.output.slice(-1500)}` : '成功'}`);
         }
         return;
       }

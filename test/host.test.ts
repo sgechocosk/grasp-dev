@@ -137,7 +137,7 @@ test('出力パネル: API を呼ぶたびに、モデル・入出力トーク�
   const lines = output.map((l) => l.replace(/^\S+( [AP]M)? /, ''));
   assert.equal(lines.filter((l) => l === `${CONFIG.model} 入力3,310(キャッシュ2,816) 出力48`).length, 4);
   assert.ok(lines.includes(`${CONFIG.model} 入力1,200(キャッシュ1,024) 出力30`));
-  // 送った内容やツールの呼び出しは記録しない (テストモードでなければ)
+  // 送った内容やツールの使用は記録しない
   assert.ok(lines.every((l) => l.startsWith(CONFIG.model)));
   assert.equal(dialogs.length, 0);
 });
@@ -151,8 +151,8 @@ test('テストモード: API を呼ぶ前に目的・モデル・想定トー�
   assert.match(dialogs[0].detail!, new RegExp(`^モデル: ${CONFIG.model}\\n想定入力トークン数: 約[\\d,]+$`));
   assert.deepEqual(dialogs[0].items, ['実行', 'この処理では以降確認しない']);
   assert.ok(h.posted.some((m) => m.type === 'walk'));
-  // テストモードでは、会話に出さないツールの呼び出しを出力パネルに残す
-  assert.ok(output.some((l) => /ツール Bash .*echo secret-output.* → 失敗\nsecret-output/.test(l)));
+  // テストモードでも、出力パネルに残すのは OpenAI API の記録だけ (ツールの使用は残さない)
+  assert.ok(output.length > 0 && output.every((l) => l.replace(/^\S+( [AP]M)? /, '').startsWith(CONFIG.model)));
 
   // 次の処理では、また確認する。取り消すと API を呼ばずに止まる
   dialogs.length = 0;
