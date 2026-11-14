@@ -9,7 +9,7 @@ import { PermissionManager } from '../src/core/permissions';
 import { createConversationState, type AgentEvent, type AssistantMessage, type ConversationState, type ToolCall } from '../src/core/types';
 import type { CompletionRequest, LLMProvider } from '../src/providers/provider';
 import { createDefaultToolRegistry } from '../src/tools';
-import { Baseline, staleFiles, writeState } from '../src/understand/changeSet';
+import { Baseline, mergeText, staleFiles, writeState } from '../src/understand/changeSet';
 import { showDiff, UNKNOWN } from '../src/understand/lesson';
 import { analyzeImpact, WorkspaceView } from '../src/understand/impact';
 import { evalArithmetic, sampleCalls, valueQuestion } from '../src/understand/lib/evaluate';
@@ -234,8 +234,14 @@ test('ステップが多いときは、問いにしないものをファイル�
 test('差分の表示: 変えた行の前後だけを残し、離れた行は省略する', () => {
   const before = Array.from({ length: 12 }, (_, i) => `line${i + 1}`).join('\n');
   const after = before.replace('line2', 'LINE2').replace('line10\n', '');
+  // 変更と変更の間が数行なら、省略せずにそのまま見せる (「1行省略」のような表記を作らない)
   assert.deepEqual(showDiff(before, after).split('\n'), [
-    '  line1', '- line2', '+ LINE2', '  line3', '  line4', '… (3行省略)', '  line8', '  line9', '- line10', '  line11', '  line12',
+    '  line1', '- line2', '+ LINE2', '  line3', '  line4', '  line5', '  line6', '  line7', '  line8', '  line9', '- line10', '  line11', '  line12',
+  ]);
+  // 離れているときだけ省略する。先頭と末尾の省略は書かない
+  const long = Array.from({ length: 30 }, (_, i) => `line${i + 1}`).join('\n');
+  assert.deepEqual(showDiff(long, long.replace('line5\n', 'LINE5\n').replace('line20\n', 'LINE20\n')).split('\n'), [
+    '  line3', '  line4', '- line5', '+ LINE5', '  line6', '  line7', '… (10行省略)', '  line18', '  line19', '- line20', '+ LINE20', '  line21', '  line22',
   ]);
   assert.equal(showDiff('', 'a\nb'), '+ a\n+ b');
   assert.equal(showDiff('same', 'same'), '');
@@ -354,8 +360,8 @@ test('実装の依頼: 変更を取り置き、確定したコードから問い
   const [start, step1] = posted as any[];
   assert.equal(start.type, 'walk_start');
   assert.equal(start.view.goal, '税率を呼び出し側から渡せるようにする');
-  assert.equal(start.view.steps, 3);
-  assert.equal(start.view.questions, 1);
+  // これからたどるステップの一覧。問いのあるステップが分かる
+  assert.deepEqual(start.view.map.map((m: any) => [m.number, m.label, m.question]), [[1, 's2 の変更', true], [2, 's1 の変更', false], [3, 's3 の変更', false]]);
   assert.deepEqual(start.view.criteria, ['税率を渡すと、その税率で金額が計算される']);
   assert.equal(step1.type, 'walk_step');
 
@@ -395,10 +401,9 @@ test('実装の依頼: 変更を取り置き、確定したコードから問い
   const correctIndex = item.blanks[0].options.indexOf('(1 + rate)');
   assert.deepEqual(reveal.view.blanks, [{ correct: false, unknown: false, answer: '(1 + rate)', chosen: wrong, correctIndex, why: '税率を足した倍率を掛ける', note: '値引きになる', calc: '' }]);
   assert.equal(reveal.view.question.correct, true);
-  // 影響の予想は合っていたので、影響の確認は折りたたむ
-  assert.equal(reveal.view.checksOpen, false);
-  // 答え合わせのあとは、理由の全文を見せる
-  assert.match(reveal.view.detail.why, /amount \* \(1 \+ rate\)/);
+  // 折りたたんで添えるのは、この変更の役割と、変更前との違い。変更の理由は、目的の1行と空欄の理由で言っているので繰り返さない
+  assert.deepEqual(Object.keys(reveal.view.detail), ['explanation', 'diffs']);
+  assert.deepEqual([reveal.view.detail.diffs[0].path, reveal.view.detail.diffs[0].line], ['src/price.ts', 1]);
   assert.equal(reveal.view.contract, 'calcPrice の引数が増える');
   const check = reveal.view.checks[0];
   // 変えなかった場所には、判断の根拠になる行そのものを添える。変えた場所の行は、あとのステップで考えるので見せない
@@ -406,8 +411,8 @@ test('実装の依頼: 変更を取り置き、確定したコードから問い
     ['src/cart.ts の cartTotal', 'changed', '', 'calcPrice に税率を渡す必要がある'],
     ['src/report.ts の reportLine', 'checked', 'return `total: ${calcPrice(amount)}`;', '表示用の行で、金額は変えない'],
   ]);
-  // 作業の中で読まれなかった場所は、判断を付けずに一覧だけを添える
-  assert.deepEqual(check.others.map((r: any) => r.label), ['src/unused.ts の legacyTotal']);
+  // 作業の中で読まれなかった場所は、判断が無いので出さない
+  assert.ok(!JSON.stringify(reveal.view).includes('legacyTotal'));
 
   // 答え合わせの前には次へ進めない。問いにできなかったステップは差分と理由をそのまま示す
   session.next();
@@ -478,7 +483,7 @@ test('基本: 1画面に問いは1つ。具体的な値と実際の行で問い�
   const [start, step1] = posted as any[];
   // 受け入れ条件は見せない (処理を追うことに絞る)
   assert.deepEqual(start.view.criteria, []);
-  assert.equal(start.view.questions, 2);
+  assert.deepEqual(start.view.map.map((m: any) => m.question), [true, true, false]);
   assert.equal(step1.view.origin, '');
   assert.equal(step1.view.oneAtATime, true);
 
@@ -506,7 +511,7 @@ test('基本: 1画面に問いは1つ。具体的な値と実際の行で問い�
     [reveal.view.blanks[0].correct, reveal.view.blanks[0].unknown, reveal.view.blanks[0].note, reveal.view.blanks[0].calc],
     [false, true, '', 'amount * (1 + rate) に amount = 100、rate = 0.1 を入れると 110'],
   );
-  assert.deepEqual([reveal.view.question.correct, reveal.view.question.unknown, reveal.view.checksOpen], [false, true, true]);
+  assert.deepEqual([reveal.view.question.correct, reveal.view.question.unknown], [false, true]);
   // あとのステップで考えるコード (呼び出し元の行と、そこで呼ぶ関数を言っている理由) は、ここではまだ見せない
   assert.ok(!JSON.stringify(reveal.view).includes('calcPrice(item, 0.1)'));
   assert.deepEqual(reveal.view.checks[0].results.map((r: any) => [r.verdict, r.reason]), [['changed', ''], ['checked', '表示用の行で、金額は変えない']]);
@@ -536,7 +541,7 @@ test('基本: 1画面に問いは1つ。具体的な値と実際の行で問い�
   assert.deepEqual(final.view.criteria, []);
 });
 
-test('上級: エージェントが変えなかった場所の扱いを判断し、問いの無いステップは止まらずに流す', async () => {
+test('上級: 変えなかった場所をそのままにしてよいかを判断し、問いの無いステップは止まらずに流す', async () => {
   const cwd = makeRepo();
   const state = createConversationState();
   const provider = scripted(changeScript(cwd), lessonJson);
@@ -547,11 +552,15 @@ test('上級: エージェントが変えなかった場所の扱いを判断し
   // 正誤のある予想ではなく、変えなかった場所の扱いを見せて判断を求める。一度も読まれていない場所を先に取り上げる
   const q = step1.view.question;
   assert.equal(q.form, 'review');
-  assert.deepEqual(q.picks, ['妥当', '変更が要る', '確認が足りない']);
-  assert.deepEqual(q.sites.map((s: any) => [s.label, s.read, s.reason, s.code]), [
-    ['src/unused.ts の legacyTotal', false, '', 'return calcPrice(amount) * 2;'],
-    ['src/report.ts の reportLine', true, '表示用の行で、金額は変えない', 'return `total: ${calcPrice(amount)}`;'],
+  assert.deepEqual(q.picks, ['このままでよい', '変更が要る', '確認が足りない']);
+  assert.deepEqual(q.sites.map((s: any) => [s.label, s.reason, s.code]), [
+    ['src/unused.ts の legacyTotal', '', 'return calcPrice(amount) * 2;'],
+    ['src/report.ts の reportLine', '表示用の行で、金額は変えない', 'return `total: ${calcPrice(amount)}`;'],
   ]);
+  // なぜその場所を確かめるのかを、変わった名前を挙げて示す
+  assert.equal(q.sites[0].why, 'calcPrice の受け取る値や返す値が変わった。calcPrice を呼び出している場所は、渡す値や結果の受け取り方を合わせる必要がありうる。');
+  // 画面に出す文章では、誰が作業したかに触れない
+  assert.ok(!JSON.stringify(posted).includes('エージェント'));
 
   // 読まれていない場所を「変更が要る」、読んで変えなかった場所を「妥当」とする
   const right = step1.view.item.blanks[0].options.indexOf('(1 + rate)');
@@ -649,6 +658,58 @@ test('取り置き中に続きを頼むと変更を戻して続け、破棄す�
   assert.match(session.takeNote(), /DISCARDED/);
   assert.equal(session.takeNote(), '');
   assert.ok(!state.fileState.has(price));
+});
+
+test('手順を作ったあとに書き換えられたファイル: 重ならなければ合わせて反映し、重なれば利用者が選ぶ', async () => {
+  // 別の場所の書き換えは、両方を残す。同じ場所・隣の行の書き換えは、決められない
+  const base = 'a\nb\nc\nd\ne\n';
+  assert.equal(mergeText(base, 'a\nB\nc\nd\ne\n', 'a\nb\nc\nd\ne\nf\n'), 'a\nB\nc\nd\ne\nf\n');
+  assert.equal(mergeText(base, 'a\nb\nc\nd\ne\nz\n', 'x\na\nb\nc\nd\ne\n'), 'x\na\nb\nc\nd\ne\nz\n');
+  assert.equal(mergeText(base, 'a\nc\nd\ne\n', 'a\nb\nc\nd\nE\n'), 'a\nc\nd\nE\n');
+  assert.equal(mergeText('a\r\nb\r\nc\r\n', 'a\r\nB\r\nc\r\n', 'a\r\nb\r\nc\r\nd\r\n'), 'a\r\nB\r\nc\r\nd\r\n');
+  assert.equal(mergeText(base, 'a\nB\nc\nd\ne\n', 'a\nX\nc\nd\ne\n'), undefined);
+  assert.equal(mergeText(base, 'a\nB\nc\nd\ne\n', 'a\nb\nC\nd\ne\n'), undefined);
+
+  const walkToFinal = async (cwd: string) => {
+    const state = createConversationState();
+    const { session, posted } = makeSession(cwd, state);
+    await runWith(session, cwd, scripted(changeScript(cwd), () => { throw new Error('no'); }), state, 'go', true);
+    return { session, posted, state };
+  };
+
+  // 利用者が、変更と重ならない場所 (ファイルの末尾) を書き換えた: たどり直さずに、両方を残して反映する
+  {
+    const cwd = makeRepo();
+    const { session, posted, state } = await walkToFinal(cwd);
+    state.fileState.set(path.join(cwd, 'src/cart.ts'), 1);
+    fs.writeFileSync(path.join(cwd, 'src/cart.ts'), FILES['src/cart.ts'] + '// edited by user\n');
+    await session.apply();
+    const done = posted[posted.length - 1] as any;
+    assert.equal(done.type, 'walk_done');
+    assert.match(done.message, /あとから書き換えられた内容と合わせて反映したファイル: src\/cart\.ts/);
+    assert.match(read(cwd, 'src/cart.ts'), /calcPrice\(item, 0\.1\)[\s\S]*\/\/ edited by user\n$/);
+    assert.match(read(cwd, 'src/price.ts'), /rate: number/);
+    // 合わせたファイルは、モデルが見た内容と違うので、読み直させる
+    assert.ok(!state.fileState.has(path.join(cwd, 'src/cart.ts')));
+  }
+
+  // 変更と同じ行を書き換えた: 何も書き込まずに知らせ、上書きするかを利用者が選ぶ
+  {
+    const cwd = makeRepo();
+    const { session, posted } = await walkToFinal(cwd);
+    const mine = FILES['src/cart.ts'].replace('calcPrice(item)', 'calcPrice(item) + 1');
+    fs.writeFileSync(path.join(cwd, 'src/cart.ts'), mine);
+    await session.apply();
+    const error = posted[posted.length - 1] as any;
+    assert.deepEqual([error.type, error.conflicts], ['walk_error', ['src/cart.ts']]);
+    assert.equal(read(cwd, 'src/cart.ts'), mine);
+    assert.equal(read(cwd, 'src/price.ts'), FILES['src/price.ts'], 'ほかのファイルにも、まだ書き込まない');
+    assert.ok(session.holding);
+    await session.apply(true);
+    assert.match((posted[posted.length - 1] as any).message, /上書きしたファイル: src\/cart\.ts/);
+    assert.match(read(cwd, 'src/cart.ts'), /calcPrice\(item, 0\.1\);/);
+    assert.match(read(cwd, 'src/price.ts'), /rate: number/);
+  }
 });
 
 test('途中で止まった作業は、問いを作らずに差分を示して反映か破棄を選べる', async () => {

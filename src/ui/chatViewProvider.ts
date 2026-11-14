@@ -183,7 +183,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         this.session?.next();
         return;
       case 'walk_apply':
-        if (!this.abort) await this.session?.apply().catch((e) => this.onAgentEvent({ type: 'error', message: `反映に失敗しました: ${(e as Error).message}` }));
+        if (!this.abort) await this.session?.apply(!!m.overwrite).catch((e) => this.onAgentEvent({ type: 'error', message: `反映に失敗しました: ${(e as Error).message}` }));
         return this.postState();
       case 'walk_discard':
         if (!this.abort) await this.session?.discard();

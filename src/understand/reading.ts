@@ -199,7 +199,7 @@ export async function buildReading(deps: ReadingDeps): Promise<Reading | undefin
 // ---------- 画面に渡す形 (実装の手順と同じ形にそろえる) ----------
 
 export function readingStartPayload(reading: Reading): Record<string, unknown> {
-  return { kind: 'reading', goal: reading.goal, criteria: [], steps: reading.items.length, questions: reading.items.length, files: 0 };
+  return { kind: 'reading', goal: reading.goal, criteria: [], map: reading.items.map((it, i) => ({ number: i + 1, label: `${it.path}:${it.startLine}`, kind: '読み解き', question: true })), files: 0 };
 }
 
 export function readingStepPayload(reading: Reading, index: number): Record<string, unknown> {
@@ -215,7 +215,7 @@ export function readingRevealPayload(reading: Reading, index: number, answer: St
   const item = reading.items[index];
   return {
     index, label: item.path, blanks: blankResults(item, answer.blanks),
-    detail: { why: '', explanation: item.explanation, diffs: [] }, contract: '', checks: [], checksOpen: false,
+    detail: { explanation: item.explanation, diffs: [] }, contract: '', checks: [],
     last: index === reading.items.length - 1, recap: !!reading.recap, flow: false,
   };
 }

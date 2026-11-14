@@ -40,7 +40,7 @@ function harness(settings: Record<string, unknown> = {}, opts: { ask?: boolean; 
     : [
         reply('読みます', [call('r1', 'Read', { file_path: file })]),
         ...(opts.ask
-          ? [reply('', [call('q1', 'AskUser', { questions: [{ question: 'どう計算しますか', why: '書き方が複数ある', options: [{ label: '加算', detail: 'n + n' }, { label: 'シフト', detail: 'n << 1' }] }] })])]
+          ? [reply('', [call('q1', 'AskUser', { questions: [{ question: 'どう計算しますか', why: '書き方が複数ある', options: [{ label: '加算(推奨)', detail: 'n + n' }, { label: 'シフト', detail: 'n << 1' }] }] })])]
           : []),
         reply('直します', [call('e1', 'Edit', { file_path: file, old_string: 'n * 2', new_string: 'n + n' })]),
         reply('', [call('b1', 'Bash', { command: 'echo secret-output && exit 2' })]),
@@ -203,6 +203,8 @@ test('受け入れ条件が一つに決まらないときは、実装の前に�
   assert.match(h.seen[0].system, /Decisions that belong to the user/);
   const ask = h.posted.find((m) => m.type === 'ask') as any;
   assert.equal(ask.questions[0].question, 'どう計算しますか');
+  // 先頭の案には画面が「おすすめ」の札を付けるので、モデルが書いた「(推奨)」は取り除く
+  assert.deepEqual(ask.questions[0].options.map((o: any) => o.label), ['加算', 'シフト']);
   // 利用者の決定がモデルに渡り、そのあとで実装が続く
   const answer = h.seen[2].messages.find((m) => m.role === 'tool' && m.toolCallId === 'q1') as any;
   assert.match(answer.content, /どう計算しますか\n {3}→ 加算/);

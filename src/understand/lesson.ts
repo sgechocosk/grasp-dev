@@ -47,14 +47,14 @@ export interface ReviewSite {
   code: string;
   /** 何を使っている場所か (変わった名前・キー) */
   subject: string;
-  /** エージェントがその行を読んだか */
-  read: boolean;
-  /** 変えなかった理由 (読んでいなければ空) */
+  /** なぜこの場所を確かめるのか (何が変わったので、ここも合わせる必要がありうるのか) */
+  why: string;
+  /** 変えなかった理由 (作業の中で読まれていなければ空) */
   reason: string;
 }
 
-/** review での判断。正誤は無く、「妥当」以外を選んだ場所を、気になった場所として最後に残す */
-export const REVIEW_PICKS = ['妥当', '変更が要る', '確認が足りない'] as const;
+/** review での判断。正誤は無く、「このままでよい」以外を選んだ場所を、気になった場所として最後に残す */
+export const REVIEW_PICKS = ['このままでよい', '変更が要る', '確認が足りない'] as const;
 
 /** 変更の影響の問い。形は経験レベルで変わる */
 export type ImpactQuestion =
@@ -119,9 +119,13 @@ export interface LessonDeps {
   onStatus?: (message: string) => void;
 }
 
+/** 変えていない行がこの行数までなら、省略せずにそのまま見せる (「1行省略」のような、省く意味の無い省略をしない) */
+const KEEP_GAP = 3;
+
 /**
  * 変更前後の差分を、変えた行の前後 context 行だけに絞って返す。
  * 各行の先頭は " "(同じ) / "-"(削除) / "+"(追加) / "…"(省略)。大きなファイルでも重くならないよう、行の対応づけ (Myers) から作る。
+ * 省略の表記は、変更と変更の間が離れているときにだけ入れる。先頭と末尾の省略は、読む人に必要な情報ではないので書かない。
  */
 export function showDiff(before: string, after: string, context = 2): string {
   // 空のファイル (新規作成の変更前・削除の変更後) は、0行として扱う
@@ -133,9 +137,13 @@ export function showDiff(before: string, after: string, context = 2): string {
     // from〜to (to は含まない) の変わっていない行。前の変更の直後と、次の変更の直前だけを残す
     const keepHead = head ? Math.min(context, to - from) : 0;
     const keepTail = tail ? Math.min(context, to - from - keepHead) : 0;
-    for (let i = from; i < from + keepHead; i++) out.push(`  ${a[i]}`);
     const skipped = to - from - keepHead - keepTail;
-    if (skipped > 0) out.push(`… (${skipped}行省略)`);
+    if (head && tail && skipped <= KEEP_GAP) {
+      for (let i = from; i < to; i++) out.push(`  ${a[i]}`);
+      return;
+    }
+    for (let i = from; i < from + keepHead; i++) out.push(`  ${a[i]}`);
+    if (head && tail) out.push(`… (${skipped}行省略)`);
     for (let i = to - keepTail; i < to; i++) out.push(`  ${a[i]}`);
   };
   const hunks = diffHunks(a, b);
@@ -543,8 +551,8 @@ export function impactQuestion(step: Step, steps: Step[], obligations: Obligatio
   const unrelated = [...new Map(pool.map((p) => [p.label, p])).values()].filter(
     (p) => !related.has(p.label) && !own.has(p.label) && !subjects.some((re) => re.test(p.text)),
   );
-  const patterns = [...new Set(changed.map((c) => c.o.pattern))];
-  const hint = patterns.map((p) => `${PATTERNS[p].name}: ${PATTERNS[p].howToFind}`).join('\n');
+  // ヒントは、何が変わったので、どんな場所を探せばよいかを、変わった名前を挙げて言う
+  const hint = [...new Set(changed.map((c) => PATTERNS[c.o.pattern].why(c.o.subject)))].join('\n');
   const secretOf = (sites: Site[]): ImpactSecret => ({
     names: [...new Set(sites.map((s) => s.symbol).filter((n): n is string => !!n))],
     paths: [...new Set(sites.map((s) => s.path))].filter((p) => !step.edits.some((e) => e.path === p)),
@@ -584,10 +592,11 @@ export function impactQuestion(step: Step, steps: Step[], obligations: Obligatio
 const MAX_REVIEWS_PER_STEP = 2;
 
 /**
- * エージェントが変えなかった場所の扱いが妥当かの判断 (review)。
- * 変えなかった判断が正しいかどうかは、機械的には確かめられない。そのため正誤は付けず、その行と、エージェントの扱い
- * (読んだうえで変えなかった理由 / 読んでいないこと) を見せて、利用者に判断してもらう。
- * 一度も読まれていない場所 (追従漏れになりうる) を先に取り上げる。
+ * 変えなかった場所を、そのままにしてよいかの判断 (review)。
+ * 変えなかった判断が正しいかどうかは、機械的には確かめられない。そのため正誤は付けず、なぜその場所を確かめるのか・
+ * その行・変えなかった理由 (あれば) を見せて、利用者に判断してもらう。
+ * 作業の中で一度も読まれていない場所 (追従漏れになりうる) を先に取り上げる。画面では、誰が作業したかには触れない
+ * (判断するのは利用者なので、「エージェントが〜した」という言い方をしない)。
  */
 export function reviewQuestion(step: Step, obligations: Obligation[], budget: number): ImpactQuestion | undefined {
   const sites = obligations
@@ -598,8 +607,8 @@ export function reviewQuestion(step: Step, obligations: Obligation[], budget: nu
   if (sites.length === 0) return undefined;
   return {
     form: 'review',
-    prompt: 'エージェントは、次の場所を変更していません。その扱いは妥当ですか?',
-    sites: sites.map(({ o, s }) => ({ label: placeLabel(s), path: s.path, line: s.line, code: s.text, subject: o.subject, read: s.verdict === 'checked', reason: s.reason })),
+    prompt: '次の場所は変更していません。このままでよいですか?',
+    sites: sites.map(({ o, s }) => ({ label: placeLabel(s), path: s.path, line: s.line, code: s.text, subject: o.subject, why: PATTERNS[o.pattern].why(o.subject), reason: s.reason })),
   };
 }
 
@@ -811,10 +820,15 @@ export function startPayload(lesson: Lesson): Record<string, unknown> {
     goal: lesson.goal,
     criteria: lesson.profile.criteria ? lesson.criteria : [],
     notice: lesson.notice,
-    steps: lesson.steps.length,
-    questions: lesson.steps.filter(hasQuestion).length,
+    // これからたどるステップの一覧。問いのあるステップが分かるようにする
+    map: lesson.steps.map((ls) => ({ number: ls.step.number, label: ls.display.label, kind: STEP_KIND_LABEL[ls.step.kind], question: hasQuestion(ls) })),
     files: lesson.changes.length,
   };
+}
+
+/** 差分の1か所。line は、いまのファイルでの行 (新しいファイルには、開ける場所がまだ無いので付けない) */
+function diffView(e: Step['edits'][number]): Record<string, unknown> {
+  return { path: e.path, line: e.created ? undefined : e.startLine, created: e.created, deleted: e.deleted, diff: showDiff(e.before, e.after) };
 }
 
 /** 答える前に見せるステップ: 見出し・目的の1行・コード・問い */
@@ -830,10 +844,10 @@ export function stepPayload(lesson: Lesson, index: number): Record<string, unkno
     kind: STEP_KIND_LABEL[s.kind],
     origin: originTag(s, lesson.steps.map((x) => x.step), lesson.profile),
     purpose: ls.display.purpose,
-    files: s.edits.map((e) => ({ path: e.path, created: e.created, deleted: e.deleted, line: e.startLine })),
+    files: s.edits.map((e) => ({ path: e.path, created: e.created, deleted: e.deleted, line: e.created ? undefined : e.startLine })),
     item: ls.item ? itemPayload(ls.item) : undefined,
     // 問いにしなかった変更は差分のまま見せる
-    diffs: ls.item ? [] : s.edits.map((e) => ({ path: e.path, created: e.created, deleted: e.deleted, diff: showDiff(e.before, e.after) })),
+    diffs: ls.item ? [] : s.edits.map(diffView),
     question: !q
       ? undefined
       : q.form === 'review'
@@ -886,10 +900,11 @@ export function concernsOf(lesson: Lesson, index: number, answer: StepAnswer): C
 }
 
 /**
- * 答え合わせ。見せるのは、予想が外れたことを正す情報だけにする。
- * - 空欄が違った・「わからない」のとき: その空欄の理由 (と、選んだ誤答が違う理由) を、その場に出す (画面側)
- * - 影響の予想が違った・「わからない」のとき: 影響の確認を開いて見せる (checksOpen)
- * それ以外の解説 (変更の理由・役割・差分) は、いつでも開けるよう折りたたんで添える (detail)。
+ * 答え合わせ。その場に出すのは、予想が外れたことを正す情報だけにする (空欄が違った・「わからない」のときの、その空欄の理由)。
+ * それ以外は、必要なら見られるよう、折りたたんで添える。
+ * - detail: この変更の役割と、変更前との違い (問いのコードには変更後しか出ないので、変更前を見られるのはここだけ)。
+ *   変更の理由は、目的の1行と空欄の理由で言っているので、繰り返さない
+ * - checks: この変更で変わったものを使っている場所を、どう判断したか
  */
 export function revealPayload(lesson: Lesson, index: number, answer: StepAnswer): Record<string, unknown> {
   const ls = lesson.steps[index];
@@ -899,12 +914,11 @@ export function revealPayload(lesson: Lesson, index: number, answer: StepAnswer)
   const blanks = item ? blankResults(item, answer.blanks) : [];
   const q = ls.question;
   let question: Record<string, unknown> | undefined;
-  let predicted = true;
   if (q && q.form === 'review') {
     question = { form: q.form, picks: q.sites.map((_, k) => answer.review?.[k] ?? -1), concerns: concernsOf(lesson, index, answer).length };
   } else if (q) {
     const picked = answer.nextUnknown ? [] : [...new Set(answer.next)].filter((i) => Number.isInteger(i) && i >= 0 && i < q.options.length).sort((a, b) => a - b);
-    predicted = picked.length === q.correct.length && picked.every((c, k) => c === q.correct[k]);
+    const predicted = picked.length === q.correct.length && picked.every((c, k) => c === q.correct[k]);
     question = { form: q.form, correct: predicted, unknown: !!answer.nextUnknown, correctIndexes: q.correct, chosen: picked };
   }
   const checks = lesson.obligations
@@ -917,22 +931,20 @@ export function revealPayload(lesson: Lesson, index: number, answer: StepAnswer)
         .filter((p) => p.verdict !== 'unseen')
         // 変えなかった場所は、判断の根拠になる行そのものを見せる。変えた場所の行は、そのステップで考えてもらうので、ここでは見せない
         .map((p) => ({ path: p.path, line: p.line, label: placeLabel(p), code: p.verdict === 'checked' ? p.text : '', verdict: p.verdict, reason: p.reason, step: numberOf(p.step) })),
-      // 作業の中で読まれなかった場所は、判断が無いので、一覧だけを添える
-      others: o.sites.filter((p) => p.verdict === 'unseen').map((p) => ({ path: p.path, line: p.line, label: placeLabel(p) })),
-      more: o.more,
-    }));
+    }))
+    // 作業の中で読まれなかった場所は、判断が無いので、ここには出さない
+    .filter((c) => c.results.length > 0);
   return {
     index,
     label: s.label,
     blanks,
     question,
     detail: item
-      ? { why: s.why, explanation: item.explanation, diffs: s.edits.map((e) => ({ path: e.path, created: e.created, deleted: e.deleted, diff: showDiff(e.before, e.after) })) }
+      ? { explanation: item.explanation, diffs: s.edits.filter((e) => !e.created).map(diffView) }
       : undefined,
     // 影響の確認: この変更で変わったものを使っている場所と、それぞれ変更が要るかどうかの判断
     contract: checks.length > 0 ? s.contract : '',
     checks,
-    checksOpen: !!q && q.form !== 'review' && !predicted,
     last: index === lesson.steps.length - 1,
     recap: !!lesson.recap,
     flow: lesson.profile.flow && !hasQuestion(ls),

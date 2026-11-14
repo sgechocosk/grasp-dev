@@ -24,11 +24,11 @@ export function renderHtml(o: HtmlOptions): string {
     <button id="keySave">保存</button>
     <button id="settingsClose" class="secondary">閉じる</button>
   </div>
-  <label for="level">経験レベル</label>
+  <label for="level">たどり方</label>
   <select id="level">
-    <option value="beginner">基本</option>
-    <option value="intermediate">実務</option>
-    <option value="advanced">上級</option>
+    <option value="beginner">コードを追う</option>
+    <option value="intermediate">影響を予想する</option>
+    <option value="advanced">変更を判断する</option>
   </select>
   <label class="toggle"><input id="testMode" type="checkbox">テストモード</label>
 </div>

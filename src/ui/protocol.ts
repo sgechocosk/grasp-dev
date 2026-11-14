@@ -67,7 +67,8 @@ export type WebviewMessage =
   | { type: 'walk_recap_answer'; picks: number[] }
   | { type: 'walk_next' }
   | { type: 'ask_response'; id: string; answers: string[] }
-  | { type: 'walk_apply' }
+  /** overwrite: 取り置いている間に同じ場所が書き換えられたファイルも、変更後の内容で上書きする */
+  | { type: 'walk_apply'; overwrite?: boolean }
   | { type: 'walk_discard' }
   | { type: 'permission_response'; toolCallId: string; decision: PermissionDecision }
   /** 画面の保存を始める / 作った画像 (PNG の data URL) を渡す */

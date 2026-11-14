@@ -237,6 +237,7 @@
   const BLANK = '___BLANK___';
   const UNKNOWN = -2; // 「わからない」を選んだことを表す、選択肢の番号
   const VERDICT = { changed: '変更が必要', checked: '変更は不要' };
+  const WHOLE_FILE_LINES = 8; // 新しいファイル・消すファイルの差分で、最初に見せる行数
   const walks = new Map(); // walk の番号 → { el, kind, steps: Map(index → stepState) }
 
   function fileLink(path, line, text) {
@@ -244,6 +245,45 @@
     a.textContent = text || (line ? `${path}:${line}` : path);
     a.addEventListener('click', () => vscode.postMessage({ type: 'openFile', path, line }));
     return a;
+  }
+  /** これから作るファイルは、まだ開けないので、リンクにせず名前だけを示す */
+  function fileName(path) {
+    const a = el('span', 'fname');
+    a.textContent = path;
+    return a;
+  }
+  /**
+   * 問い・ヒント・解説は、どこに出ても同じ見た目にする: 左の線の色と、先頭の札で区別する。
+   * - 問い (q): 利用者が答えるもの  - ヒント (hint): 答える前に、求めたときだけ出る手がかり  - 解説 (res): 答えたあとに出る説明
+   */
+  const KIND_LABEL = { q: '問い', hint: 'ヒント', res: '解説' };
+  function kindTag(kind) {
+    return el('span', 'ktag ' + kind, KIND_LABEL[kind]);
+  }
+  function hintBlock(node) {
+    const d = el('div', 'kbox hint');
+    d.appendChild(kindTag('hint'));
+    if (typeof node === 'string') d.appendChild(textBlock('', node));
+    else d.appendChild(node);
+    return d;
+  }
+  /** 答え合わせの箱。合っていれば ok、違う・わからないなら attn */
+  function resultBlock(ok) {
+    const d = el('div', 'kbox res ' + (ok ? 'ok' : 'attn'));
+    d.appendChild(kindTag('res'));
+    if (ok) d.appendChild(textBlock('verdict', '合っています'));
+    return d;
+  }
+  const calm = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+  function glide(node, block) {
+    node.scrollIntoView({ block: block || 'start', behavior: calm ? 'auto' : 'smooth' });
+  }
+  /** 空欄と、その選択肢のつながりを示す: 相手の位置まで画面を動かし、短く光らせる */
+  function pulse(node, block) {
+    glide(node, block || 'nearest');
+    node.classList.remove('pulse');
+    void node.offsetWidth;
+    node.classList.add('pulse');
   }
   function section(title) {
     const sec = el('div', 'wsec');
@@ -270,20 +310,31 @@
   function diffBlock(d) {
     const box = el('div', 'wdiff');
     const head = el('div', 'dpath');
-    head.appendChild(fileLink(d.path));
+    head.appendChild(d.created ? fileName(d.path) : fileLink(d.path, d.line));
     if (d.created) head.appendChild(el('span', 'tag', '新規'));
     if (d.deleted) head.appendChild(el('span', 'tag', '削除'));
     box.appendChild(head);
-    const rows = String(d.diff || '').split('\n').map((l) => {
+    const row = (l) => {
       const cls = l.startsWith('+') ? 'add' : l.startsWith('-') ? 'del' : l.startsWith('…') ? 'skip' : '';
       return `<div class="${cls}">${esc(l) || '&nbsp;'}</div>`;
-    });
-    box.appendChild(el('div', 'diff', rows.join('')));
+    };
+    const lines = String(d.diff || '').split('\n');
+    // 新しいファイル・消すファイルは、全部の行が並ぶ。最初の数行だけを見せ、残りは求めたときに開く
+    const whole = (d.created || d.deleted) && lines.length > WHOLE_FILE_LINES + 3;
+    const body = el('div', 'diff', (whole ? lines.slice(0, WHOLE_FILE_LINES) : lines).map(row).join(''));
+    box.appendChild(body);
+    if (whole) {
+      const more = el('button', 'link');
+      more.textContent = `残りの${lines.length - WHOLE_FILE_LINES}行を表示`;
+      more.dataset.keep = '1';
+      more.addEventListener('click', () => { body.innerHTML = lines.map(row).join(''); more.remove(); });
+      box.appendChild(more);
+    }
     return box;
   }
-  /** 続けて流しているステップでは、最初の1つにだけ画面を合わせる (利用者が操作するまで動かさない) */
+  /** 次のステップへは、画面をなめらかに動かす。続けて流しているステップでは、最初の1つにだけ合わせる (利用者が操作するまで動かさない) */
   function reveal(w, node) {
-    if (!w.hold) node.scrollIntoView({ block: 'start' });
+    if (!w.hold) glide(node);
   }
 
   /** 空欄つきのコード。離れた行は折りたたむ */
@@ -355,31 +406,39 @@
 
   function blankControls(item, st, k) {
     const b = item.blanks[k];
-    const box = el('div', 'qblank');
+    const box = el('div', 'kbox q qblank');
     // 値で問うときは問いの文を、コードで問うときは何についての空欄かを見出しにする
-    const head = el('div', 'qhead', `<span class="qno">［${k + 1}］</span><span class="${b.ask ? 'qask' : 'concept'}">${esc(b.ask || b.concept)}</span>`);
+    const head = el('div', 'qhead');
+    head.appendChild(kindTag('q'));
+    head.appendChild(el('span', 'qtext', `<span class="qno">［${k + 1}］</span>${esc(b.ask || `${b.concept}: ここに入るコードはどれですか?`)}`));
+    box.appendChild(head);
     const hintBtn = el('button', 'link');
     hintBtn.textContent = 'ヒントを見る';
-    head.appendChild(hintBtn);
-    box.appendChild(head);
+    // コードの空欄を押すと、その選択肢へ移る
+    st.blankEls[k].classList.add('jump');
+    st.blankEls[k].title = '選択肢へ';
+    st.blankEls[k].addEventListener('click', () => pulse(box, 'center'));
     const blankText = (i) => (i >= 0 ? b.options[i] : `［${k + 1}］`);
     const opts = optionRow(st, b.options.length, (o, i) => { o.textContent = b.labels ? b.labels[i] : b.options[i]; }, (i) => {
       st.chosen[k] = i;
       st.blankEls[k].textContent = blankText(i);
       st.blankEls[k].classList.toggle('filled', i >= 0);
+      // 選んだものが、コードのどこに入ったかを示す
+      if (i >= 0) pulse(st.blankEls[k]);
     });
     st.optEls[k] = opts;
     box.appendChild(opts);
+    box.appendChild(hintBtn);
     const hints = el('div', 'qhints');
     box.appendChild(hints);
     // 手がかりは段階的に: 概念 → 考え方 → 手がかりの場所 → 誤りの選択肢を1つ消す
-    const stages = b.hints.map((h) => () => hints.appendChild(textBlock('hint', h)));
+    const stages = b.hints.map((h) => () => hints.appendChild(hintBlock(h)));
     if (b.clue) {
       stages.push(() => {
-        const d = el('div', 'wtext hint');
+        const d = el('div', 'wtext');
         d.appendChild(fileLink(b.clue.path, b.clue.line));
         d.appendChild(document.createTextNode(b.clue.note ? ` — ${b.clue.note}` : ''));
-        hints.appendChild(d);
+        hints.appendChild(hintBlock(d));
       });
     }
     if (b.eliminate) {
@@ -395,7 +454,7 @@
           st.refresh();
         }
         const shown = b.labels ? b.labels[b.eliminate.index] : b.options[b.eliminate.index];
-        hints.appendChild(textBlock('hint', `「${shown}」は違います。${b.eliminate.note || ''}`));
+        hints.appendChild(hintBlock(`「${shown}」は違います。${b.eliminate.note || ''}`));
       });
     }
     let used = 0;
@@ -409,21 +468,27 @@
     return box;
   }
 
-  /** 変更の影響の問い。形は経験レベルで変わる (行から選ぶ / 場所から選ぶ / エージェントの扱いを判断する) */
+  /** 変更の影響の問い。形はたどり方で変わる (行から選ぶ / 場所から選ぶ / 変えなかった場所をそのままにしてよいか判断する) */
   function impactControls(q, st) {
-    const sec = section('この変更の影響');
-    sec.appendChild(textBlock('', q.prompt));
+    const sec = el('div', 'kbox q');
+    const qhead = el('div', 'qhead');
+    qhead.appendChild(kindTag('q'));
+    qhead.appendChild(el('span', 'qtext', esc(q.prompt)));
+    sec.appendChild(qhead);
     if (q.form === 'review') {
       st.review = q.sites.map(() => -1);
       st.reviewEls = [];
+      // なぜこれらの場所を確かめるのか。どの場所も同じ理由なら、1回だけ示す
+      const shared = q.sites.every((x) => x.why === q.sites[0].why);
+      if (shared && q.sites[0].why) sec.appendChild(textBlock('small', q.sites[0].why));
       q.sites.forEach((s, n) => {
         const box = el('div', 'rsite');
         const head = el('div', 'chead');
         head.appendChild(fileLink(s.path, s.line, s.label));
-        head.appendChild(el('span', 'small', `<code>${esc(s.subject)}</code> を使っている場所`));
         box.appendChild(head);
+        if (!shared && s.why) box.appendChild(textBlock('small', s.why));
         box.appendChild(codeLine(s.code));
-        box.appendChild(textBlock('small', s.read ? `エージェントの扱い: 読んだうえで、変更していない${s.reason ? ` — ${s.reason}` : ''}` : 'エージェントの扱い: 読まずに、変更していない'));
+        if (s.reason) box.appendChild(textBlock('small', `変更しない理由: ${s.reason}`));
         const picks = el('div', 'qopts');
         q.picks.forEach((label, i) => {
           const o = el('button', 'opt plain');
@@ -465,7 +530,7 @@
     if (q.hint) {
       const hintBtn = el('button', 'link');
       hintBtn.textContent = '探し方のヒントを見る';
-      hintBtn.addEventListener('click', () => { sec.appendChild(textBlock('hint', q.hint)); hintBtn.remove(); });
+      hintBtn.addEventListener('click', () => { sec.appendChild(hintBlock(q.hint)); hintBtn.remove(); });
       sec.appendChild(hintBtn);
     }
     return sec;
@@ -488,7 +553,9 @@
       const it = v.item;
       const sec = section('');
       const where = el('div', 'wfiles');
-      where.appendChild(fileLink(it.path, it.startLine));
+      const created = (v.files || []).some((f) => f.path === it.path && f.created);
+      where.appendChild(created ? fileName(it.path) : fileLink(it.path, it.startLine));
+      if (created) where.appendChild(el('span', 'tag', '新規'));
       sec.appendChild(where);
       st.chosen = it.blanks.map(() => -1);
       sec.appendChild(codeBlock(it, st));
@@ -500,12 +567,13 @@
       card.appendChild(sec);
     } else if (v.files && v.files.length && !(v.diffs || []).length) {
       const where = el('div', 'wfiles');
-      v.files.forEach((f) => where.appendChild(fileLink(f.path, f.line)));
+      v.files.forEach((f) => where.appendChild(f.created ? fileName(f.path) : fileLink(f.path, f.line)));
       card.appendChild(where);
     }
     (v.diffs || []).forEach((d) => card.appendChild(diffBlock(d)));
     if (v.question) {
       const sec = impactControls(v.question, st);
+      st.nextBox = sec;
       const q = v.question;
       gates.push({ el: sec, done: () => (q.form === 'review' ? st.review.every((p) => p >= 0) : st.nextUnknown || st.next.size > 0) });
       card.appendChild(sec);
@@ -548,7 +616,7 @@
     st.actions.innerHTML = '';
     st.card.querySelectorAll('.opt').forEach((b) => (b.disabled = true));
     // 使わなかったヒントのリンクは片づける
-    st.card.querySelectorAll('button.link').forEach((b) => b.remove());
+    st.card.querySelectorAll('button.link').forEach((b) => { if (!b.dataset.keep) b.remove(); });
     // 答える前は伏せていた見出しを、全文に戻す
     if (st.labelEl) st.labelEl.textContent = r.label;
     const item = st.view.item;
@@ -570,9 +638,8 @@
       const box = st.blankBoxes[k];
       if (!box) return;
       const why = el('div', 'wtext', `<code>${esc(b.answer)}</code> になる理由: ${esc(b.why || '')}`);
-      const res = el('div', 'qres ' + (b.correct ? 'ok' : 'attn'));
+      const res = resultBlock(b.correct);
       if (b.correct) {
-        res.appendChild(textBlock('', '✓ 合っています'));
         if (b.why) quietWhys.push(why);
         if (b.calc) quietWhys.push(textBlock('small', `計算: ${b.calc}`));
       } else {
@@ -586,7 +653,12 @@
     const rq = r.question;
     if (rq && rq.form === 'review') {
       (st.reviewEls || []).forEach((row, n) => [...row.children].forEach((o, i) => o.classList.toggle('sel', i === rq.picks[n])));
-      if (rq.concerns > 0) st.reveal.appendChild(textBlock('small', `${rq.concerns}か所を、気になった場所として残しました。最後の「変更の全体像」でまとめて確かめられます。`));
+      if (rq.concerns > 0) {
+        const res = el('div', 'kbox res attn');
+        res.appendChild(kindTag('res'));
+        res.appendChild(textBlock('', `${rq.concerns}か所を、気になった場所として残しました。最後の「変更の全体像」でまとめて確かめられます。`));
+        st.nextBox.appendChild(res);
+      }
     } else if (rq && st.nextEl) {
       [...st.nextEl.children].forEach((o) => {
         const i = Number(o.dataset.i);
@@ -594,38 +666,31 @@
         else if (rq.chosen.includes(i) || (rq.unknown && i === UNKNOWN)) o.classList.add('attn');
       });
       // どれが該当するかは選択肢の色で示す (違っていたときに、同じ内容を文章で繰り返さない)
-      if (rq.correct) st.nextEl.after(textBlock('qres ok', '✓ 合っています'));
+      const res = resultBlock(rq.correct);
+      if (!rq.correct) res.appendChild(textBlock('', '該当するものは、緑の枠で示しています。'));
+      st.nextBox.appendChild(res);
     }
     const d = r.detail;
-    if (d && (d.why || d.explanation || (d.diffs || []).length || quietWhys.length)) {
+    if (d && (d.explanation || (d.diffs || []).length || quietWhys.length)) {
       // 変更の理由・役割・差分は、予想を正す情報ではないので、いつでも開けるよう折りたたんで添える
-      const box = fold(reading ? '解説を見る' : '理由と差分を見る', false);
+      // 変更の理由は、目的の1行と空欄の理由で言っているので繰り返さない。差分は、変更前のコードを見られる唯一の場所
+      const box = fold((d.diffs || []).length ? 'くわしく: この変更の役割と、変更前との違い' : 'くわしく: このコードの役割', false);
       quietWhys.forEach((n) => box.appendChild(n));
-      if (d.why) {
-        const sec = section('変更の理由');
-        sec.appendChild(textBlock('', d.why));
-        box.appendChild(sec);
-      }
       if (d.explanation) {
         const sec = section(reading ? 'このコードの役割' : 'この変更の役割');
         sec.appendChild(textBlock('', d.explanation));
         box.appendChild(sec);
       }
       if ((d.diffs || []).length) {
-        const sec = section('変更の全体');
+        const sec = section('変更前との違い');
         d.diffs.forEach((x) => sec.appendChild(diffBlock(x)));
         box.appendChild(sec);
       }
       st.reveal.appendChild(box);
     }
     if ((r.checks || []).length) {
-      // 影響の確認: この変更で変わったものを使っている場所と、それぞれ変更が要るかどうか
-      const count = (f) => r.checks.reduce((n, c) => n + f(c), 0);
-      const changed = count((c) => c.results.filter((p) => p.verdict === 'changed').length);
-      const checked = count((c) => c.results.filter((p) => p.verdict === 'checked').length);
-      const unseen = count((c) => (c.others || []).length + (c.more || 0));
-      const parts = [changed ? `変更が必要 ${changed}` : '', checked ? `変更は不要 ${checked}` : '', unseen ? `未確認 ${unseen}` : ''].filter(Boolean);
-      const box = fold(`影響の確認(${parts.join('・')})`, r.checksOpen);
+      // この変更で変わったものを使っている場所を、どう判断したか。必要なら見られるよう、いつも折りたたんで添える
+      const box = fold('くわしく: ほかの場所への影響を、どう確かめたか', false);
       if (r.contract) box.appendChild(textBlock('', `変わる点: ${r.contract}`));
       r.checks.forEach((c) => {
         const sec = el('div', 'check');
@@ -633,25 +698,13 @@
         sec.appendChild(textBlock('small', `見るところ: ${c.criterion}`));
         c.results.forEach((p) => {
           const row = el('div', 'site ' + p.verdict);
-          row.appendChild(el('span', 'badge', esc(VERDICT[p.verdict] + (p.step ? ` → ステップ${p.step}` : ''))));
+          row.appendChild(el('span', 'badge', esc(VERDICT[p.verdict] + (p.step ? `(ステップ${p.step})` : ''))));
           row.appendChild(fileLink(p.path, p.line, p.label));
           // 判断の根拠になる行そのものを見せる。理由の文は、その場所に固有のものがあるときだけ
           if (p.code) row.appendChild(codeLine(p.code));
           if (p.reason) row.appendChild(textBlock('small', p.reason));
           sec.appendChild(row);
         });
-        const rest = (c.others || []).length + (c.more || 0);
-        if (rest > 0) {
-          // 作業の中で読まれなかった場所は、判断が無いので、控えめに一覧だけを添える
-          const more = el('details', 'others');
-          more.appendChild(el('summary', '', `ほかに、同じ名前が出てくる場所が${rest}か所あります(エージェントは読んでいません)`));
-          (c.others || []).forEach((p) => {
-            const row = el('div', 'site');
-            row.appendChild(fileLink(p.path, p.line, p.label));
-            more.appendChild(row);
-          });
-          sec.appendChild(more);
-        }
         box.appendChild(sec);
       });
       st.reveal.appendChild(box);
@@ -690,14 +743,18 @@
     card.appendChild(text);
     const gates = [];
     v.blanks.forEach((b, k) => {
-      const box = el('div', 'qblank');
-      box.appendChild(el('div', 'qhead', `<span class="qno">［${k + 1}］</span><span class="concept">ここに入る部品</span>`));
+      const box = el('div', 'kbox q qblank');
+      const qhead = el('div', 'qhead');
+      qhead.appendChild(kindTag('q'));
+      qhead.appendChild(el('span', 'qtext', `<span class="qno">［${k + 1}］</span>ここに入る部品はどれですか?`));
+      box.appendChild(qhead);
       const opts = optionRow(st, b.options.length, (o, i) => { o.textContent = b.options[i]; }, (i) => {
         st.chosen[k] = i;
         st.slots[k].forEach((s) => {
           s.textContent = i >= 0 ? b.options[i] : `［${k + 1}］`;
           s.classList.toggle('filled', i >= 0);
         });
+        if (i >= 0 && st.slots[k][0]) pulse(st.slots[k][0]);
       });
       st.optEls[k] = opts;
       st.boxes[k] = box;
@@ -742,9 +799,8 @@
         if (i === b.correctIndex) o.classList.add('ok');
         else if (i === b.chosen) o.classList.add('attn');
       });
-      const res = el('div', 'qres ' + (b.correct ? 'ok' : 'attn'));
-      if (b.correct) res.appendChild(textBlock('', '✓ 合っています'));
-      else {
+      const res = resultBlock(b.correct);
+      if (!b.correct) {
         // 外れた・わからないときは、その部品がある場所を示す (開いて確かめられる)
         const d = el('div', 'wtext', `<code>${esc(b.answer)}</code> の場所: `);
         d.appendChild(fileLink(b.where.path, b.where.line));
@@ -865,8 +921,16 @@
         v.criteria.forEach((c, i) => sec.appendChild(textBlock('', `${i + 1}. ${c}`)));
         head.appendChild(sec);
       }
-      // これからたどる量だけを示す (各ステップの見出しは、そのステップで見せる)
-      if (v.steps) head.appendChild(textBlock('small', v.kind === 'reading' ? `読みどころは${v.steps}つ` : `${v.steps}ステップ(問いがあるのは${v.questions}ステップ)`));
+      // これからたどるステップの一覧。何を実装するのかの全体と、問いのあるステップが、ここで分かる
+      if ((v.map || []).length) {
+        const sec = section(v.kind === 'reading' ? '読みどころ' : '実装するステップ');
+        v.map.forEach((s) => {
+          const row = el('div', 'maprow', `<span class="mno">${s.number}.</span><span class="mlabel">${esc(s.label)}</span>`);
+          if (s.question && v.kind !== 'reading') row.appendChild(kindTag('q'));
+          sec.appendChild(row);
+        });
+        head.appendChild(sec);
+      }
       box.appendChild(head);
       append(box);
       head.scrollIntoView({ block: 'start' });
@@ -882,6 +946,13 @@
     else if (m.type === 'walk_error') {
       if (w.errorEl) w.errorEl.textContent = m.message;
       else addNote('error', m.message);
+      // 同じ場所が書き換えられていたときは、上書きして反映する選択肢を足す (元に戻して「反映する」を押し直すこともできる)
+      if ((m.conflicts || []).length && w.finalActions && !w.finalActions.querySelector('.overwrite')) {
+        const force = el('button', 'secondary overwrite');
+        force.textContent = '上書きして反映する';
+        force.addEventListener('click', () => vscode.postMessage({ type: 'walk_apply', overwrite: true }));
+        w.finalActions.insertBefore(force, w.finalActions.children[1] || null);
+      }
     } else if (m.type === 'walk_done') {
       w.el.classList.add('closed');
       w.el.querySelectorAll('button').forEach((b) => (b.disabled = true));

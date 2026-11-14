@@ -11,15 +11,15 @@ export type LearnerLevel = 'beginner' | 'intermediate' | 'advanced';
 export const LEARNER_LEVELS: LearnerLevel[] = ['beginner', 'intermediate', 'advanced'];
 
 export const LEVEL_LABEL: Record<LearnerLevel, string> = {
-  beginner: '基本',
-  intermediate: '実務',
-  advanced: '上級',
+  beginner: 'コードを追う',
+  intermediate: '影響を予想する',
+  advanced: '変更を判断する',
 };
 
 export const LEVEL_DESCRIPTION: Record<LearnerLevel, string> = {
   beginner: 'コードを1行ずつ追いたい人向け。1画面に問いは1つ。具体的な値や、目の前の行で確かめます。',
   intermediate: '実務エンジニア向け。変更がどこに及ぶかを予想しながら、ステップをたどります。',
-  advanced: 'レビューする人向け。問いは判断の分かれ目だけ。エージェントが変えなかった場所の扱いを自分で判断します。',
+  advanced: 'レビューする人向け。問いは判断の分かれ目だけ。変えなかった場所をそのままにしてよいかを、自分で判断します。',
 };
 
 /**

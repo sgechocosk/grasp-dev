@@ -1,6 +1,6 @@
 import * as fs from 'node:fs/promises';
 import type { AgentEvent, ConversationState } from '../core/types';
-import { Baseline, staleFiles, writeState, type FileChange } from './changeSet';
+import { Baseline, planApply, staleFiles, writePlan, writeState, type FileChange } from './changeSet';
 import { WorkspaceView } from './impact';
 import {
   buildLesson, concernsOf, finalPayload, hasQuestion, plainLesson, recapPayload, recapRevealPayload, revealPayload, startPayload, stepPayload,
@@ -20,7 +20,8 @@ export type WalkMessage =
   | { type: 'walk_recap'; walk: number; view: Record<string, unknown> }
   | { type: 'walk_recap_reveal'; walk: number; view: Record<string, unknown> }
   | { type: 'walk_final'; walk: number; view: Record<string, unknown> }
-  | { type: 'walk_error'; walk: number; message: string }
+  /** conflicts: 取り置いている間に同じ場所が書き換えられていて、そのままでは反映できないファイル (上書きするかを利用者が選ぶ) */
+  | { type: 'walk_error'; walk: number; message: string; conflicts?: string[] }
   | { type: 'walk_done'; walk: number; outcome: 'applied' | 'discarded' | 'read' | 'continued'; message: string };
 
 export interface SessionOptions {
@@ -242,21 +243,36 @@ export class UnderstandSession {
     this.o.post({ type: 'walk_done', walk: walk.id, outcome, message });
   }
 
-  /** たどり終えた変更を、まとめてファイルに反映する */
-  async apply(): Promise<void> {
+  /**
+   * たどり終えた変更を、まとめてファイルに反映する。
+   * 取り置いている間に利用者が書き換えたファイルは、変更が重ならなければ、両方を残して反映する (たどり直しにしない)。
+   * 同じ場所が書き換えられていたら、何も書き込まずに知らせる。overwrite なら、そのファイルも変更後の内容にする。
+   */
+  async apply(overwrite = false): Promise<void> {
     const walk = this.walk;
     if (!walk || !this.held || !walk.final) return;
-    const stale = await staleFiles(this.held.changes, 'before');
-    if (stale.length > 0) {
-      this.o.post({ type: 'walk_error', walk: walk.id, message: `手順を作ったあとに書き換えられたファイルがあるため、反映しませんでした: ${stale.join(', ')}。元に戻してからもう一度反映するか、破棄してください。` });
+    const { changes } = this.held;
+    const plan = await planApply(changes, overwrite);
+    if (plan.conflicts.length > 0 && !overwrite) {
+      this.o.post({
+        type: 'walk_error', walk: walk.id, conflicts: plan.conflicts,
+        message:
+          `手順を作ったあとに、変更する場所と同じ場所が書き換えられたファイルがあります: ${plan.conflicts.join(', ')}。` +
+          'まだ何も反映していません。そのファイルを元に戻してから反映するか、あとから書き換えた内容を上書きして反映するかを選んでください。',
+      });
       return;
     }
-    const { changes } = this.held;
-    await writeState(changes, 'after');
+    await writePlan(plan);
     await this.syncFileState(changes);
+    // 利用者の編集と合わせたファイルは、モデルが最後に見た内容と違うので、次に編集する前に読み直させる
+    for (const c of changes) if (plan.merged.includes(c.rel)) this.o.state.fileState.delete(c.path);
     this.held = undefined;
     this.baseline = undefined;
-    this.closeWalk('applied', `${changes.length}個のファイルに変更を反映しました。`);
+    const notes = [
+      plan.merged.length > 0 ? `あとから書き換えられた内容と合わせて反映したファイル: ${plan.merged.join(', ')}。` : '',
+      overwrite && plan.conflicts.length > 0 ? `あとから書き換えられた内容を上書きしたファイル: ${plan.conflicts.join(', ')}。` : '',
+    ].filter(Boolean);
+    this.closeWalk('applied', [`${changes.length}個のファイルに変更を反映しました。`, ...notes].join('\n'));
   }
 
   /** 取り置いた変更を捨てる (ファイルは変更前のまま) */
