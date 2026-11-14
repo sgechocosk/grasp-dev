@@ -174,13 +174,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         this.pendingAsks.get(m.id)?.(Array.isArray(m.answers) ? m.answers.map(String) : []);
         return;
       case 'walk_answer':
-        this.session?.answer(m.index, { blanks: m.blanks, next: m.next });
+        this.session?.answer(m.index, { blanks: m.blanks, next: m.next, nextUnknown: m.nextUnknown, review: m.review });
+        return;
+      case 'walk_recap_answer':
+        this.session?.answerRecap(m.picks);
         return;
       case 'walk_next':
         this.session?.next();
         return;
       case 'walk_apply':
-        if (!this.abort) await this.session?.apply().catch((e) => this.onAgentEvent({ type: 'error', message: `反映に失敗しました: ${(e as Error).message}` }));
+        if (!this.abort) await this.session?.apply(!!m.overwrite).catch((e) => this.onAgentEvent({ type: 'error', message: `反映に失敗しました: ${(e as Error).message}` }));
         return this.postState();
       case 'walk_discard':
         if (!this.abort) await this.session?.discard();

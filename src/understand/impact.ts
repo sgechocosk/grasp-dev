@@ -15,7 +15,8 @@ export type PatternId = 'callers' | 'behavior' | 'shape' | 'keys' | 'usage';
 export interface PatternInfo {
   name: string;
   trigger: string;
-  howToFind: string;
+  /** 何が変わり、そのためにどんな場所を確かめるのか (利用者に見せる。subject は変わった名前・キー) */
+  why: (subject: string) => string;
   criterion: string;
 }
 
@@ -23,31 +24,31 @@ export const PATTERNS: Record<PatternId, PatternInfo> = {
   callers: {
     name: '呼び出し元の追従',
     trigger: '関数・メソッドの引数や戻り値(シグネチャ)を変えた、または削除した',
-    howToFind: 'その名前を使っている場所(呼び出し元)を、単語で検索してすべて探す',
+    why: (s) => `${s} の受け取る値や返す値が変わった。${s} を呼び出している場所は、渡す値や結果の受け取り方を合わせる必要がありうる。`,
     criterion: '新しい引数を渡しているか、戻り値の使い方が新しい形に合っているか',
   },
   behavior: {
     name: '振る舞いの変化の確認',
     trigger: '関数の中身を変えた(戻り値の意味や、エラーになる条件が変わりうる)',
-    howToFind: '呼び出し元を検索し、戻り値や例外で分岐している箇所を見る',
+    why: (s) => `${s} の中の処理が変わった。${s} の結果を使っている場所は、変更前の動きを前提にしていることがありうる。`,
     criterion: '呼び出し元が、変更前の振る舞いを前提にしていないか',
   },
   shape: {
     name: 'データ形状の追従',
     trigger: '型・インターフェース・列挙の中身を足した/変えた/消した',
-    howToFind: 'その型を使っている場所(値を作る・読み書きする・種類で分岐する箇所)を探す',
+    why: (s) => `${s} の項目が変わった。${s} の値を作っている場所・読んでいる場所は、新しい項目に合わせる必要がありうる。`,
     criterion: '新しい項目を設定・読み取り・分岐する必要があるか',
   },
   keys: {
     name: 'キーの対応(送る側と受ける側)',
     trigger: 'メッセージの種類・設定キー・イベント名などの文字列キーを足した/消した',
-    howToFind: '同じキーを文字列として検索する(名前の参照をたどっても見つからない結びつき)',
+    why: (s) => `「${s}」という文字列で、送る側と受け取る側が結びついている。同じ文字列を書いている場所は、そろえる必要がありうる。`,
     criterion: '送る側と受ける側、登録する側と使う側がそろっているか',
   },
   usage: {
     name: '新しい定義の利用',
     trigger: '関数・型などを新しく追加した',
-    howToFind: '追加した名前を使っている場所を、単語で検索する',
+    why: (s) => `${s} を新しく追加した。${s} を使っている場所は、使い方が定義に合っている必要がある。`,
     criterion: '追加した定義が実際に使われているか、使い方が定義に合っているか',
   },
 };
@@ -258,6 +259,11 @@ export function analyzeImpact(steps: Step[], changes: FileChange[], view: Worksp
     }
   }
   return obligations;
+}
+
+/** その確認先を探すのに使った、名前・キーの出現のパターン */
+export function subjectPattern(o: Pick<Obligation, 'pattern' | 'subject'>): RegExp {
+  return o.pattern === 'keys' ? quotedLiteralPattern(o.subject) : wordRe(o.subject);
 }
 
 export function placeLabel(site: Pick<Site, 'path' | 'symbol'>): string {
