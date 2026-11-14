@@ -11,9 +11,9 @@ export type LearnerLevel = 'beginner' | 'intermediate' | 'advanced';
 export const LEARNER_LEVELS: LearnerLevel[] = ['beginner', 'intermediate', 'advanced'];
 
 export const LEVEL_LABEL: Record<LearnerLevel, string> = {
-  beginner: 'コードを追う',
-  intermediate: '影響を予想する',
-  advanced: '変更を判断する',
+  beginner: '基本',
+  intermediate: '実務',
+  advanced: '上級',
 };
 
 export const LEVEL_DESCRIPTION: Record<LearnerLevel, string> = {
