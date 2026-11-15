@@ -50,7 +50,9 @@ export type HostMessage =
   | ({ type: 'permission_request' } & PermissionView)
   | { type: 'permission_cancel'; toolCallId: string }
   /** 画面の保存: スタイルシートの本文を渡して、Webview に画像を作らせる */
-  | { type: 'capture'; css: string };
+  | { type: 'capture'; css: string }
+  /** 手順の途中の質問への回答 (作れなかったときは error) */
+  | { type: 'walk_question_answer'; id: string; text?: string; error?: string };
 
 export type WebviewMessage =
   | { type: 'ready' }
@@ -66,6 +68,11 @@ export type WebviewMessage =
   /** まとめ (仕組みの説明の空欄) への答え */
   | { type: 'walk_recap_answer'; picks: number[] }
   | { type: 'walk_next' }
+  /**
+   * 手順の途中で、画面の一部を選んでする質問 (用語の確認・仕組みの解説)。手順の進み方には関わらない。
+   * target は質問したカード ({ kind: 'start' | 'recap' | 'final' } または { kind: 'step', index })
+   */
+  | { type: 'walk_question'; id: string; walk: number; target: unknown; selection: string; question: string }
   | { type: 'ask_response'; id: string; answers: string[] }
   /** overwrite: 取り置いている間に同じ場所が書き換えられたファイルも、変更後の内容で上書きする */
   | { type: 'walk_apply'; overwrite?: boolean }
