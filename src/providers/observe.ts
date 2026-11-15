@@ -10,8 +10,10 @@ export interface CallInfo {
 }
 
 export interface ObserveOptions {
-  /** API を呼ぶたびに1行: 「モデル 入力(キャッシュ) 出力」、失敗は「モデル エラー 理由」。送った内容は含めない */
+  /** API を呼ぶたびに1行: 「モデル 目的」、失敗は「モデル エラー 理由」。送った内容は含めない */
   log: (line: string) => void;
+  /** 使ったトークン数 (入力・キャッシュ・出力) も記録するか。テストモードのときだけ true にする */
+  tokens?: () => boolean;
   /** 呼び出しの前に確認する。false なら呼び出さずに中止する */
   confirm?: (info: CallInfo) => Promise<boolean>;
 }
@@ -59,7 +61,8 @@ export function observeProvider(inner: LLMProvider, o: ObserveOptions): LLMProvi
       try {
         const res = await inner.complete(req, onEvent);
         const u = res.usage;
-        o.log(u ? `${req.model} 入力${fmt(u.inputTokens)}(キャッシュ${fmt(u.cachedTokens ?? 0)}) 出力${fmt(u.outputTokens)}` : `${req.model} (トークン数の報告なし)`);
+        const used = !o.tokens?.() ? '' : u ? ` 入力${fmt(u.inputTokens)}(キャッシュ${fmt(u.cachedTokens ?? 0)}) 出力${fmt(u.outputTokens)}` : ' (トークン数の報告なし)';
+        o.log(`${req.model} ${purpose}${used}`);
         return res;
       } catch (e) {
         if (!req.signal?.aborted) o.log(`${req.model} エラー ${String((e as Error)?.message ?? e).slice(0, 200)}`);

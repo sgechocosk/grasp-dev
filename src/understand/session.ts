@@ -1,8 +1,11 @@
 import * as fs from 'node:fs/promises';
 import type { AgentEvent, ConversationState } from '../core/types';
-import { Baseline, staleFiles, writeState, type FileChange } from './changeSet';
+import { Baseline, planApply, staleFiles, writePlan, writeState, type FileChange } from './changeSet';
 import { WorkspaceView } from './impact';
-import { buildLesson, finalPayload, plainLesson, revealPayload, startPayload, stepPayload, type Lesson, type StepAnswer } from './lesson';
+import {
+  buildLesson, concernsOf, finalPayload, hasQuestion, plainLesson, recapPayload, recapRevealPayload, revealPayload, startPayload, stepPayload,
+  type Concern, type Lesson, type StepAnswer,
+} from './lesson';
 import type { LearnerLevel } from './lib/level';
 import type { Asker } from './llm';
 import { buildReading, readingRevealPayload, readingStartPayload, readingStepPayload, type Reading } from './reading';
@@ -13,8 +16,12 @@ export type WalkMessage =
   | { type: 'walk_start'; walk: number; view: Record<string, unknown> }
   | { type: 'walk_step'; walk: number; view: Record<string, unknown> }
   | { type: 'walk_reveal'; walk: number; view: Record<string, unknown> }
+  /** まとめ (仕組みの説明の空欄) と、その答え合わせ */
+  | { type: 'walk_recap'; walk: number; view: Record<string, unknown> }
+  | { type: 'walk_recap_reveal'; walk: number; view: Record<string, unknown> }
   | { type: 'walk_final'; walk: number; view: Record<string, unknown> }
-  | { type: 'walk_error'; walk: number; message: string }
+  /** conflicts: 取り置いている間に同じ場所が書き換えられていて、そのままでは反映できないファイル (上書きするかを利用者が選ぶ) */
+  | { type: 'walk_error'; walk: number; message: string; conflicts?: string[] }
   | { type: 'walk_done'; walk: number; outcome: 'applied' | 'discarded' | 'read' | 'continued'; message: string };
 
 export interface SessionOptions {
@@ -41,6 +48,10 @@ interface Walk {
   index: number;
   answered: boolean;
   final: boolean;
+  /** まとめの段階: 問いを出した (asked) / 答え合わせを見せた (shown) */
+  recap?: 'asked' | 'shown';
+  /** 利用者が「妥当」以外を選んだ場所 (最後のまとめで見せる) */
+  concerns: Concern[];
 }
 
 /**
@@ -56,7 +67,6 @@ export class UnderstandSession {
   private held?: { changes: FileChange[]; unheld: string[] };
   private walk?: Walk;
   private walkCount = 0;
-  private note = '';
 
   constructor(private o: SessionOptions) {}
 
@@ -68,13 +78,6 @@ export class UnderstandSession {
   /** たどっている途中の手順があるか */
   get walking(): boolean {
     return !!this.walk;
-  }
-
-  /** 次の依頼の前に、モデルへ伝えること (変更を破棄したとき)。読むと消える */
-  takeNote(): string {
-    const n = this.note;
-    this.note = '';
-    return n;
   }
 
   /** 実行の前に呼ぶ。続けられないときは例外 (その理由を利用者に見せる) */
@@ -119,7 +122,7 @@ export class UnderstandSession {
       const reading = await buildReading({ cwd: this.o.cwd, request: opts.request, recorder, asker: opts.asker, level: opts.level, signal: opts.signal, onStatus: this.o.status })
         .catch(() => undefined);
       if (!reading) return false;
-      this.walk = { id: ++this.walkCount, content: reading, index: 0, answered: false, final: false };
+      this.walk = { id: ++this.walkCount, content: reading, index: 0, answered: false, final: false, concerns: [] };
       this.o.post({ type: 'walk_start', walk: this.walk.id, view: readingStartPayload(reading) });
       this.postStep();
       return true;
@@ -142,7 +145,7 @@ export class UnderstandSession {
     if (committed) {
       lesson.notice = [lesson.notice, '作業の中でコミットが行われています。変更を破棄しても、そのコミットは残ります。'].filter(Boolean).join('\n');
     }
-    this.walk = { id: ++this.walkCount, content: lesson, index: 0, answered: false, final: false };
+    this.walk = { id: ++this.walkCount, content: lesson, index: 0, answered: false, final: false, concerns: [] };
     this.o.post({ type: 'walk_start', walk: this.walk.id, view: startPayload(lesson) });
     if (lesson.steps.length > 0) this.postStep();
     else this.postFinal();
@@ -156,36 +159,69 @@ export class UnderstandSession {
   private postStep(): void {
     const walk = this.walk!;
     const c = walk.content;
-    walk.answered = false;
-    this.o.post({ type: 'walk_step', walk: walk.id, view: c.kind === 'lesson' ? stepPayload(c, walk.index) : readingStepPayload(c, walk.index) });
-    // 問いの無いステップ (差分だけ見せるもの) は、そのまま影響の追い方まで見せる
-    if (c.kind === 'lesson' && !c.steps[walk.index].item && !c.steps[walk.index].question) this.answer(walk.index, { blanks: [], next: [] });
+    // 問いの無いステップ (差分だけ見せるもの) は、そのまま影響の追い方まで見せる。
+    // 続けて流すレベルでは、次の問いのあるステップ (無ければ、まとめ) まで止まらずに進む
+    for (;;) {
+      walk.answered = false;
+      this.o.post({ type: 'walk_step', walk: walk.id, view: c.kind === 'lesson' ? stepPayload(c, walk.index) : readingStepPayload(c, walk.index) });
+      if (c.kind !== 'lesson' || hasQuestion(c.steps[walk.index])) return;
+      this.answer(walk.index, { blanks: [], next: [] });
+      if (!c.profile.flow) return;
+      walk.index++;
+      if (walk.index >= c.steps.length) return this.afterSteps();
+    }
+  }
+
+  /** ステップをたどり終えたあと: まとめの問いがあれば出し、無ければ最後へ */
+  private afterSteps(): void {
+    const walk = this.walk!;
+    const c = walk.content;
+    if (c.recap && !walk.recap) {
+      walk.recap = 'asked';
+      this.o.post({ type: 'walk_recap', walk: walk.id, view: recapPayload(c.recap, c.kind) });
+    } else if (c.kind === 'lesson') this.postFinal();
+    else this.finishReading('');
   }
 
   private postFinal(): void {
     const walk = this.walk!;
     walk.final = true;
-    if (walk.content.kind === 'lesson') this.o.post({ type: 'walk_final', walk: walk.id, view: finalPayload(walk.content) });
+    if (walk.content.kind === 'lesson') this.o.post({ type: 'walk_final', walk: walk.id, view: finalPayload(walk.content, walk.concerns) });
   }
 
   /** 利用者の答えを受けて、答え合わせを見せる */
   answer(index: number, answer: StepAnswer): void {
     const walk = this.walk;
-    if (!walk || walk.final || walk.answered || index !== walk.index) return;
+    if (!walk || walk.final || walk.recap || walk.answered || index !== walk.index) return;
     walk.answered = true;
-    const a: StepAnswer = { blanks: Array.isArray(answer?.blanks) ? answer.blanks.map(Number) : [], next: Array.isArray(answer?.next) ? answer.next.map(Number) : [] };
+    const numbers = (v: unknown): number[] => (Array.isArray(v) ? v.map(Number) : []);
+    const a: StepAnswer = { blanks: numbers(answer?.blanks), next: numbers(answer?.next), nextUnknown: !!answer?.nextUnknown, review: numbers(answer?.review) };
     const c = walk.content;
+    if (c.kind === 'lesson') walk.concerns.push(...concernsOf(c, index, a));
     this.o.post({ type: 'walk_reveal', walk: walk.id, view: c.kind === 'lesson' ? revealPayload(c, index, a) : readingRevealPayload(c, index, a) });
   }
 
-  /** 答え合わせのあと、次のステップ (無ければまとめ) へ進む */
+  /** まとめの問いへの答えを受けて、答え合わせを見せる */
+  answerRecap(picks: number[]): void {
+    const walk = this.walk;
+    const recap = walk?.content.recap;
+    if (!walk || !recap || walk.recap !== 'asked') return;
+    walk.recap = 'shown';
+    this.o.post({ type: 'walk_recap_reveal', walk: walk.id, view: recapRevealPayload(recap, Array.isArray(picks) ? picks.map(Number) : [], walk.content.kind) });
+  }
+
+  /** 答え合わせのあと、次のステップ (無ければ、まとめ・最後) へ進む */
   next(): void {
     const walk = this.walk;
-    if (!walk || walk.final || !walk.answered) return;
+    if (!walk || walk.final) return;
+    if (walk.recap) {
+      if (walk.recap === 'shown') this.afterSteps();
+      return;
+    }
+    if (!walk.answered) return;
     walk.index++;
     if (walk.index < this.total(walk)) this.postStep();
-    else if (walk.content.kind === 'lesson') this.postFinal();
-    else this.finishReading('');
+    else this.afterSteps();
   }
 
   private finishReading(message: string): void {
@@ -199,32 +235,56 @@ export class UnderstandSession {
     this.o.post({ type: 'walk_done', walk: walk.id, outcome, message });
   }
 
-  /** たどり終えた変更を、まとめてファイルに反映する */
-  async apply(): Promise<void> {
+  /**
+   * たどり終えた変更を、まとめてファイルに反映する。
+   * 取り置いている間に利用者が書き換えたファイルは、変更が重ならなければ、両方を残して反映する (たどり直しにしない)。
+   * 同じ場所が書き換えられていたら、何も書き込まずに知らせる。overwrite なら、そのファイルも変更後の内容にする。
+   */
+  async apply(overwrite = false): Promise<void> {
     const walk = this.walk;
     if (!walk || !this.held || !walk.final) return;
-    const stale = await staleFiles(this.held.changes, 'before');
-    if (stale.length > 0) {
-      this.o.post({ type: 'walk_error', walk: walk.id, message: `手順を作ったあとに書き換えられたファイルがあるため、反映しませんでした: ${stale.join(', ')}。元に戻してからもう一度反映するか、破棄してください。` });
+    const { changes } = this.held;
+    const plan = await planApply(changes, overwrite);
+    if (plan.conflicts.length > 0 && !overwrite) {
+      this.o.post({
+        type: 'walk_error', walk: walk.id, conflicts: plan.conflicts,
+        message:
+          `手順を作ったあとに、変更する場所と同じ場所が書き換えられたファイルがあります: ${plan.conflicts.join(', ')}。` +
+          'まだ何も反映していません。そのファイルを元に戻してから反映するか、あとから書き換えた内容を上書きして反映するかを選んでください。',
+      });
       return;
     }
-    const { changes } = this.held;
-    await writeState(changes, 'after');
+    await writePlan(plan);
     await this.syncFileState(changes);
+    // 利用者の編集と合わせたファイルは、モデルが最後に見た内容と違うので、次に編集する前に読み直させる
+    for (const c of changes) if (plan.merged.includes(c.rel)) this.o.state.fileState.delete(c.path);
     this.held = undefined;
     this.baseline = undefined;
-    this.closeWalk('applied', `${changes.length}個のファイルに変更を反映しました。`);
+    this.forget();
+    const notes = [
+      plan.merged.length > 0 ? `あとから書き換えられた内容と合わせて反映したファイル: ${plan.merged.join(', ')}。` : '',
+      overwrite && plan.conflicts.length > 0 ? `あとから書き換えられた内容を上書きしたファイル: ${plan.conflicts.join(', ')}。` : '',
+    ].filter(Boolean);
+    this.closeWalk('applied', [`${changes.length}個のファイルに変更を反映しました。`, ...notes].join('\n'));
+  }
+
+  /**
+   * 反映・破棄で1つの依頼が終わったら、モデルとの会話の履歴を捨てる。
+   * 次の依頼は新しい会話として始まるので、終わった依頼の調査や編集のやり取りを送り直さずに済む (API の使用量を抑える)。
+   * 読んだファイルの記録も捨てる (モデルはもう内容を覚えていないので、編集の前に読み直させる)。画面の表示は消さない。
+   */
+  private forget(): void {
+    this.o.state.messages = [];
+    this.o.state.fileState.clear();
   }
 
   /** 取り置いた変更を捨てる (ファイルは変更前のまま) */
   async discard(): Promise<void> {
     if (!this.held) return;
-    for (const c of this.held.changes) this.o.state.fileState.delete(c.path);
-    this.note =
-      'Note: the user reviewed and DISCARDED all file changes made in the previous task. The workspace files are back in their original state, ' +
-      'so those changes do not exist. Read files again before editing them.';
     this.held = undefined;
     this.baseline = undefined;
+    // 履歴ごと捨てるので、破棄したことをモデルに伝える必要は無い (捨てた変更を、モデルはもう知らない)
+    this.forget();
     this.closeWalk('discarded', '変更を破棄しました。');
   }
 

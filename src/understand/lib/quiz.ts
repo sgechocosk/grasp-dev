@@ -706,6 +706,42 @@ export function validateRawItem(raw: RawItem, fileText: string, options: Validat
 
 // ---------- 表示量の調整 ----------
 
+/** keep に挙げた番号の空欄だけを残し、ほかは答えを埋めてコードに戻す */
+export function keepBlanks(item: QuizItem, keep: number[]): QuizItem {
+  const parts = item.quizCode.split(BLANK);
+  let code = parts[0] ?? '';
+  for (let k = 0; k < item.blanks.length; k++) code += (keep.includes(k) ? BLANK : item.blanks[k]!.answer) + (parts[k + 1] ?? '');
+  return { ...item, quizCode: code, blanks: item.blanks.filter((_, k) => keep.includes(k)) };
+}
+
+/**
+ * 問いを、レベルに合った量にする: 空欄は maxBlanks 個まで、選択肢は optionCount 個まで。
+ * 変更の問いでは、変えた行にある空欄を先に残す。選択肢は、違う理由が書かれている誤答を先に残す。
+ */
+export function limitItem(item: QuizItem, maxBlanks: number, optionCount: number): QuizItem {
+  let out = item;
+  if (item.blanks.length > maxBlanks) {
+    const code = splitLines(resolveBlanks(item.quizCode, item.blanks.map((b) => b.answer)));
+    const changed = item.kind === 'change' ? changedLineIndexes(splitLines(item.original), code) : new Set<number>();
+    const lineOf: number[] = [];
+    splitLines(item.quizCode).forEach((l, i) => {
+      for (let n = l.split(BLANK).length - 1; n > 0; n--) lineOf.push(i);
+    });
+    const order = item.blanks.map((_, k) => k).sort((x, y) => Number(changed.has(lineOf[y]!)) - Number(changed.has(lineOf[x]!)) || x - y);
+    out = keepBlanks(item, order.slice(0, maxBlanks));
+  }
+  return {
+    ...out,
+    blanks: out.blanks.map((b) => {
+      const choices = b.choices ?? [];
+      const wrong = choices.filter((c) => c.code !== b.answer);
+      if (wrong.length <= optionCount - 1) return b;
+      const kept = new Set([...wrong.filter((c) => c.note), ...wrong.filter((c) => !c.note)].slice(0, optionCount - 1));
+      return { ...b, choices: choices.filter((c) => c.code === b.answer || kept.has(c)) };
+    }),
+  };
+}
+
 /** 空欄・変更行の前後に残す行数 */
 export const CONTEXT_LINES = 3;
 

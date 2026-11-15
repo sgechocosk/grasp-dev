@@ -24,6 +24,8 @@ export interface BlankSpec {
   why?: string;
   /** 答えを導く手がかりになる別の場所(答えそのものは含まない行) */
   clue?: CodeRef;
+  /** 具体的な値で問う形 (計算で確かめられるときだけ)。labels は choices と同じ並び */
+  value?: { ask: string; labels: string[]; calc: string };
 }
 
 export type QuizKind = 'change' | 'read';

@@ -19,7 +19,7 @@ export const ASK_INSTRUCTIONS = `# Decisions that belong to the user
 The user is the one developing this software; you carry out their decisions.
 - After you have investigated enough to know the realistic options, and BEFORE changing any file, check whether the acceptance criteria of the request are uniquely determined.
 - If there is more than one reasonable interpretation or design that would change observable behaviour, scope, data, or a public contract (function signatures, message types, setting keys, UI wording), call AskUser and wait for the answer. Do not pick one silently.
-- Ask 1-3 questions. Each has 2-4 concrete options, the one you recommend first. Each option's detail says what would be built and what it touches (files, functions, behaviour).
+- Ask 1-3 questions. Each has 2-4 concrete options, the one you recommend first. Do not write "recommended" (推奨 / おすすめ) in the option text; the first option is shown with a badge. Each option's detail says what would be built and what it touches (files, functions, behaviour).
 - Do not ask about things you can determine from the code, or details with an obvious conventional default. If the request is already unambiguous, do not ask.
 - Ask once per task; ask again only if the answer itself opens a new decision.
 - Write the questions and options in the user's language, in plain words. Explain project-specific names when you mention them.`;
@@ -82,13 +82,16 @@ export function createAskUserTool(ask: AskHandler): Tool<Input> {
   };
 }
 
+const RECOMMENDED = /\s*[((【\[]\s*(?:推奨|おすすめ|お勧め|オススメ|recommended)\s*[))】\]]\s*/gi;
+
 /** モデルが返した質問を、見せられる形にそろえる (1〜3問、各2〜4択) */
 export function normalizeQuestions(raw: unknown): AskQuestion[] {
   const out: AskQuestion[] = [];
   for (const q of Array.isArray(raw) ? raw : []) {
     const question = String(q?.question ?? '').trim();
     const options = (Array.isArray(q?.options) ? q.options : [])
-      .map((o: any) => ({ label: String(o?.label ?? '').trim(), detail: String(o?.detail ?? '').trim() }))
+      // 先頭の案には画面が「おすすめ」の札を付けるので、モデルが書いた「(推奨)」などは取り除く
+      .map((o: any) => ({ label: String(o?.label ?? '').replace(RECOMMENDED, '').trim(), detail: String(o?.detail ?? '').trim() }))
       .filter((o: { label: string }) => o.label)
       .slice(0, 4);
     if (question && options.length >= 2) out.push({ question, why: String(q?.why ?? '').trim(), options });

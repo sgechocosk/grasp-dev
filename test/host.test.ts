@@ -40,7 +40,7 @@ function harness(settings: Record<string, unknown> = {}, opts: { ask?: boolean; 
     : [
         reply('読みます', [call('r1', 'Read', { file_path: file })]),
         ...(opts.ask
-          ? [reply('', [call('q1', 'AskUser', { questions: [{ question: 'どう計算しますか', why: '書き方が複数ある', options: [{ label: '加算', detail: 'n + n' }, { label: 'シフト', detail: 'n << 1' }] }] })])]
+          ? [reply('', [call('q1', 'AskUser', { questions: [{ question: 'どう計算しますか', why: '書き方が複数ある', options: [{ label: '加算(推奨)', detail: 'n + n' }, { label: 'シフト', detail: 'n << 1' }] }] })])]
           : []),
         reply('直します', [call('e1', 'Edit', { file_path: file, old_string: 'n * 2', new_string: 'n + n' })]),
         reply('', [call('b1', 'Bash', { command: 'echo secret-output && exit 2' })]),
@@ -133,14 +133,22 @@ test('実行中: コマンドや編集は会話に出さず、作業の内容を
   assert.match(fs.readFileSync(h.file, 'utf8'), /n \+ n/);
 });
 
-test('出力パネル: API を呼ぶたびに、モデル・入出力トークン数・キャッシュを1行で記録する', async () => {
+test('出力パネル: 利用者の操作と API の呼び出しを、時刻つきで1行ずつ記録する。トークン数はテストモードのときだけ', async () => {
   const h = harness();
   await h.send({ type: 'send', text: '足し算にして' });
+  await h.send({ type: 'walk_answer', index: 0, blanks: [], next: [] });
+  await h.send({ type: 'walk_next' });
+  // どの行にも時刻が付く
+  assert.ok(output.every((l) => /^\d{1,2}:\d{2}/.test(l)), output.join('\n'));
   const lines = output.map((l) => l.replace(/^\S+( [AP]M)? /, ''));
-  assert.equal(lines.filter((l) => l === `${CONFIG.model} 入力3,310(キャッシュ2,816) 出力48`).length, 4);
-  assert.ok(lines.includes(`${CONFIG.model} 入力1,200(キャッシュ1,024) 出力30`));
-  // 送った内容やツールの使用は記録しない
-  assert.ok(lines.every((l) => l.startsWith(CONFIG.model)));
+  // 操作は、何をしたかだけを残す (選んだ内容・書いた内容は残さない)
+  assert.deepEqual(lines.filter((l) => l.startsWith('操作')), ['操作 依頼を送信', '操作 問いに回答(1番目)', '操作 次へ進む']);
+  // API の呼び出しは、モデルと目的だけ。トークン数は出さない
+  const calls = lines.filter((l) => l.startsWith(CONFIG.model));
+  assert.equal(calls.length + 3, lines.length);
+  assert.ok(calls.includes(`${CONFIG.model} 変更の理由と受け入れ条件の整理`), calls.join('\n'));
+  assert.ok(calls.some((l) => l.startsWith(`${CONFIG.model} 調査と実装`)));
+  assert.ok(!lines.some((l) => /入力|出力|足し算/.test(l)), lines.join('\n'));
   assert.equal(dialogs.length, 0);
 });
 
@@ -153,8 +161,10 @@ test('テストモード: API を呼ぶ前に目的・モデル・想定トー�
   assert.match(dialogs[0].detail!, new RegExp(`^モデル: ${CONFIG.model}\\n想定入力トークン数: 約[\\d,]+$`));
   assert.deepEqual(dialogs[0].items, ['実行', 'この処理では以降確認しない']);
   assert.ok(h.posted.some((m) => m.type === 'walk'));
-  // テストモードでも、出力パネルに残すのは OpenAI API の記録だけ (ツールの使用は残さない)
-  assert.ok(output.length > 0 && output.every((l) => l.replace(/^\S+( [AP]M)? /, '').startsWith(CONFIG.model)));
+  // テストモードでは、API の記録に使ったトークン数が付く。出力パネルに残すのは操作と API の記録だけ (ツールの使用は残さない)
+  const logged = output.map((l) => l.replace(/^\S+( [AP]M)? /, ''));
+  assert.ok(logged.length > 0 && logged.every((l) => l.startsWith(CONFIG.model) || l.startsWith('操作 ')), logged.join('\n'));
+  assert.ok(logged.includes(`${CONFIG.model} 変更の理由と受け入れ条件の整理 入力1,200(キャッシュ1,024) 出力30`), logged.join('\n'));
 
   // 次の処理では、また確認する。取り消すと API を呼ばずに止まる
   dialogs.length = 0;
@@ -203,6 +213,8 @@ test('受け入れ条件が一つに決まらないときは、実装の前に�
   assert.match(h.seen[0].system, /Decisions that belong to the user/);
   const ask = h.posted.find((m) => m.type === 'ask') as any;
   assert.equal(ask.questions[0].question, 'どう計算しますか');
+  // 先頭の案には画面が「おすすめ」の札を付けるので、モデルが書いた「(推奨)」は取り除く
+  assert.deepEqual(ask.questions[0].options.map((o: any) => o.label), ['加算', 'シフト']);
   // 利用者の決定がモデルに渡り、そのあとで実装が続く
   const answer = h.seen[2].messages.find((m) => m.role === 'tool' && m.toolCallId === 'q1') as any;
   assert.match(answer.content, /どう計算しますか\n {3}→ 加算/);

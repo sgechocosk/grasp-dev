@@ -61,10 +61,14 @@ export type WebviewMessage =
   | { type: 'setLevel'; level: string }
   | { type: 'setTestMode'; on: boolean }
   | { type: 'openFile'; path: string; line?: number }
-  | { type: 'walk_answer'; index: number; blanks: number[]; next: number[] }
+  /** 問いへの答え。番号は選択肢の位置 (-2 は「わからない」)。review は、場所ごとの判断 */
+  | { type: 'walk_answer'; index: number; blanks: number[]; next: number[]; nextUnknown?: boolean; review?: number[] }
+  /** まとめ (仕組みの説明の空欄) への答え */
+  | { type: 'walk_recap_answer'; picks: number[] }
   | { type: 'walk_next' }
   | { type: 'ask_response'; id: string; answers: string[] }
-  | { type: 'walk_apply' }
+  /** overwrite: 取り置いている間に同じ場所が書き換えられたファイルも、変更後の内容で上書きする */
+  | { type: 'walk_apply'; overwrite?: boolean }
   | { type: 'walk_discard' }
   | { type: 'permission_response'; toolCallId: string; decision: PermissionDecision }
   /** 画面の保存を始める / 作った画像 (PNG の data URL) を渡す */

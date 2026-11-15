@@ -39,15 +39,29 @@ export const BLANKS_SCHEMA = {
   },
 } as const;
 
-export const REFS_SCHEMA = {
+/** 具体的な値で問うための、引数に入れる値の例 (答えはシステムが計算で求める) */
+export const INPUTS_SCHEMA = {
   type: 'array',
   items: {
     type: 'object',
-    properties: { path: STRING, line: INTEGER, note: STRING },
-    required: ['path', 'line', 'note'],
+    properties: { name: STRING, value: { type: 'number' } },
+    required: ['name', 'value'],
     additionalProperties: false,
   },
 } as const;
+
+export interface RawInput {
+  name?: string;
+  value?: number;
+}
+
+export function proposedInputs(inputs: RawInput[] | undefined): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const i of Array.isArray(inputs) ? inputs : []) {
+    if (typeof i?.name === 'string' && typeof i.value === 'number' && Number.isFinite(i.value)) out.set(i.name.trim(), i.value);
+  }
+  return out;
+}
 
 export const NEW_NAMES_SCHEMA = {
   type: 'array',
@@ -60,9 +74,9 @@ export const NEW_NAMES_SCHEMA = {
 } as const;
 
 /** 選択肢 (誤答) の作り方 */
-export function distractorRules(): string[] {
+export function distractorRules(count = 3): string[] {
   return [
-    '【選択肢 distractors(誤答を3つ)】',
+    `【選択肢 distractors(誤答を${count}つ)】`,
     '- 目的は「コードベースを読んで根拠を確かめないと選べない」こと。勘や見た目で消去できる誤答は作らない。',
     '- 良い誤答: 実在する似た名前の別の関数・変数・フィールド(責務が違う)/ 引数の取り違え・順序違い / 境界条件の違い(< と <=)/ 条件の反転 /',
     '  同じファイルの別の箇所にある似た式 / 呼ぶ順序や呼ぶ相手を間違えたもの。どれもこのコードベースで実際に書かれうるもの。',
@@ -191,6 +205,16 @@ export function withoutLeaks(text: string, answers: string[], shown: ReadonlySet
   }
   const out = sentences.join('').trim();
   return reveals(out) ? '' : out;
+}
+
+/**
+ * ファイルの名前 (パス、またはその末尾のファイル名) を挙げている文を取り除く。
+ * 影響の及ぶ場所を予想してもらう前に、そのファイルを文章で言ってしまわないために使う。
+ */
+export function withoutMentions(text: string, paths: string[]): string {
+  const needles = [...new Set(paths.flatMap((p) => [p, p.slice(p.lastIndexOf('/') + 1)]))].filter(Boolean);
+  if (needles.length === 0) return text ?? '';
+  return (text ?? '').split(/(?<=[。\n])/).filter((s) => !needles.some((n) => s.includes(n))).join('').trim();
 }
 
 /**

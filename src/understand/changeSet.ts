@@ -3,6 +3,8 @@ import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
+import { diffHunks, matchedLines } from './lib/diff';
+import { detectEol, splitLines } from './lib/text';
 
 /** 1ファイルの変更。before / after が null なら、そのファイルが無い (新規作成 / 削除)。 */
 export interface FileChange {
@@ -181,4 +183,85 @@ export async function staleFiles(changes: FileChange[], expect: 'before' | 'afte
     if ('hash' in now || now.text !== c[expect]) out.push(c.rel);
   }
   return out;
+}
+
+/**
+ * 変更前 (base) → 変更後 (after) の書き換えを、いまの内容 (current) に重ねる。
+ * 取り置いている間に利用者がそのファイルの別の場所を編集していても、両方の変更を残して反映するために使う。
+ * 書き換える行とその前後の行が、いまの内容でもそのまま残っているときだけ重ねる。
+ * 同じ場所が書き換えられていて決められなければ undefined (どちらを残すかは利用者が決める)。
+ */
+export function mergeText(base: string, after: string, current: string): string | undefined {
+  const a = splitLines(base);
+  const o = splitLines(after);
+  const c = splitLines(current);
+  const at = new Map(matchedLines(a, c));
+  const edits: Array<{ start: number; count: number; lines: string[] }> = [];
+  for (const h of diffHunks(a, o)) {
+    const first = h.oldStart;
+    const last = h.oldStart + h.oldCount - 1;
+    // 書き換える範囲と、その前後の1行ずつが、いまの内容でも同じ並びで残っていること
+    const from = Math.max(0, first - 1);
+    const to = Math.min(a.length - 1, last + 1);
+    for (let k = from; k <= to; k++) {
+      if (!at.has(k) || (k > from && at.get(k) !== at.get(k - 1)! + 1)) return undefined;
+    }
+    // ファイルの先頭・末尾に接する書き換えは、いまの内容でも先頭・末尾であること
+    if (first === 0 && at.get(from) !== 0) return undefined;
+    if (last === a.length - 1 && at.get(to) !== c.length - 1) return undefined;
+    const start = h.oldCount > 0 ? at.get(first)! : first > 0 ? at.get(first - 1)! + 1 : 0;
+    edits.push({ start, count: h.oldCount, lines: o.slice(h.newStart, h.newStart + h.newCount) });
+  }
+  const out = c.slice();
+  for (const e of edits.sort((x, y) => y.start - x.start)) out.splice(e.start, e.count, ...e.lines);
+  return out.join(detectEol(current));
+}
+
+export interface ApplyPlan {
+  /** 書き込む内容 (null はファイルを消す) */
+  writes: Array<{ change: FileChange; content: string | null }>;
+  /** 取り置いている間に書き換えられていて、その内容と合わせて反映するファイル */
+  merged: string[];
+  /** 同じ場所が書き換えられていて、合わせられないファイル */
+  conflicts: string[];
+}
+
+/**
+ * 取り置いた変更を、いまのファイルに反映する計画を立てる (書き込みはしない)。
+ * - 変更前のままのファイル: 変更後の内容にする
+ * - 取り置いている間に書き換えられたファイル: 重ならなければ、両方の変更を残した内容にする (merged)。重なっていれば conflicts
+ * overwrite なら、conflicts のファイルも変更後の内容にする (あとから書き換えた内容は失われる)。
+ */
+export async function planApply(changes: FileChange[], overwrite = false): Promise<ApplyPlan> {
+  const plan: ApplyPlan = { writes: [], merged: [], conflicts: [] };
+  for (const change of changes) {
+    const now = await readState(change.path);
+    const text = 'hash' in now ? undefined : now.text;
+    if (text === change.after) continue;
+    if (text === change.before) {
+      plan.writes.push({ change, content: change.after });
+      continue;
+    }
+    const merged = typeof text === 'string' && change.before !== null && change.after !== null ? mergeText(change.before, change.after, text) : undefined;
+    if (merged !== undefined) {
+      plan.merged.push(change.rel);
+      plan.writes.push({ change, content: merged });
+    } else {
+      plan.conflicts.push(change.rel);
+      if (overwrite) plan.writes.push({ change, content: change.after });
+    }
+  }
+  return plan;
+}
+
+export async function writePlan(plan: ApplyPlan): Promise<void> {
+  for (const { change, content } of plan.writes) {
+    if (content === null) {
+      await fsp.rm(change.path, { force: true });
+      continue;
+    }
+    await fsp.mkdir(path.dirname(change.path), { recursive: true });
+    await fsp.writeFile(change.path, content, 'utf8');
+    if (change.mode !== undefined) await fsp.chmod(change.path, change.mode).catch(() => undefined);
+  }
 }
