@@ -93,6 +93,8 @@
   }
   function append(node) {
     const stick = nearBottom();
+    // たどる手順の末尾に置いた余白は、続きが足されたら要らない
+    if (typeof dropTail === 'function') dropTail();
     messagesEl.appendChild(node);
     if (stick) messagesEl.scrollTop = messagesEl.scrollHeight;
     return node;
@@ -238,6 +240,7 @@
   const UNKNOWN = -2; // 「わからない」を選んだことを表す、選択肢の番号
   const VERDICT = { changed: '変更が必要', checked: '変更は不要' };
   const WHOLE_FILE_LINES = 8; // 新しいファイル・消すファイルの差分で、最初に見せる行数
+  const TOP_GAP = 20; // ステップを上に合わせたときの、上の余白と会話の欄の内側の余白
   const walks = new Map(); // walk の番号 → { el, kind, steps: Map(index → stepState) }
 
   function fileLink(path, line, text) {
@@ -260,20 +263,31 @@
   function kindTag(kind) {
     return el('span', 'ktag ' + kind, KIND_LABEL[kind]);
   }
-  function hintBlock(node) {
-    const d = el('div', 'kbox hint');
-    d.appendChild(kindTag('hint'));
-    if (typeof node === 'string') d.appendChild(textBlock('', node));
-    else d.appendChild(node);
-    return d;
+  /**
+   * ヒントを1つ足す。1つの問いのヒントは、1つの箱にまとめる (札は先頭に1つだけ。ヒントどうしは細い線で区切る)。
+   * parent は、その問いのヒントを置く場所。
+   */
+  function addHint(parent, node) {
+    let box = parent.querySelector(':scope > .kbox.hint');
+    if (!box) {
+      box = el('div', 'kbox hint');
+      box.appendChild(kindTag('hint'));
+      parent.appendChild(box);
+    }
+    const item = typeof node === 'string' ? textBlock('hitem', node) : node;
+    item.classList.add('hitem');
+    box.appendChild(item);
   }
-  /** 答え合わせの箱。合っていれば ok、違う・わからないなら attn */
+  /**
+   * 答え合わせの箱。合っていれば ok、違う・わからないなら attn (どちらかは、線と札の色で分かる)。
+   * 合っていたときも「合っています」とは書かず、ごく短い解説だけを入れる。入れるものが無ければ、箱ごと出さない。
+   */
   function resultBlock(ok) {
     const d = el('div', 'kbox res ' + (ok ? 'ok' : 'attn'));
     d.appendChild(kindTag('res'));
-    if (ok) d.appendChild(textBlock('verdict', '合っています'));
     return d;
   }
+  const hasBody = (res) => res.children.length > 1;
   const calm = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
   function glide(node, block) {
     node.scrollIntoView({ block: block || 'start', behavior: calm ? 'auto' : 'smooth' });
@@ -334,7 +348,23 @@
   }
   /** 次のステップへは、画面をなめらかに動かす。続けて流しているステップでは、最初の1つにだけ合わせる (利用者が操作するまで動かさない) */
   function reveal(w, node) {
+    fitTail(node);
     if (!w.hold) glide(node);
+  }
+  /**
+   * 新しいステップを、いつも画面のいちばん上に合わせられるようにする。
+   * 会話の末尾にある短いステップは、その下に続きが無いと上まで動かせないので、足りない高さを末尾の余白で補う。
+   * 余白は、その下に何かが足されたら消す (append)。
+   */
+  const tail = el('div', 'wtail');
+  function fitTail(node) {
+    tail.style.height = '0px';
+    messagesEl.appendChild(tail);
+    const below = tail.getBoundingClientRect().top - node.getBoundingClientRect().top;
+    tail.style.height = `${Math.max(0, Math.ceil(messagesEl.clientHeight - below - TOP_GAP))}px`;
+  }
+  function dropTail() {
+    tail.style.height = '0px';
   }
 
   /** 空欄つきのコード。離れた行は折りたたむ */
@@ -432,13 +462,13 @@
     const hints = el('div', 'qhints');
     box.appendChild(hints);
     // 手がかりは段階的に: 概念 → 考え方 → 手がかりの場所 → 誤りの選択肢を1つ消す
-    const stages = b.hints.map((h) => () => hints.appendChild(hintBlock(h)));
+    const stages = b.hints.map((h) => () => addHint(hints, h));
     if (b.clue) {
       stages.push(() => {
         const d = el('div', 'wtext');
         d.appendChild(fileLink(b.clue.path, b.clue.line));
         d.appendChild(document.createTextNode(b.clue.note ? ` — ${b.clue.note}` : ''));
-        hints.appendChild(hintBlock(d));
+        addHint(hints, d);
       });
     }
     if (b.eliminate) {
@@ -454,7 +484,7 @@
           st.refresh();
         }
         const shown = b.labels ? b.labels[b.eliminate.index] : b.options[b.eliminate.index];
-        hints.appendChild(hintBlock(`「${shown}」は違います。${b.eliminate.note || ''}`));
+        addHint(hints, `「${shown}」は違います。${b.eliminate.note || ''}`);
       });
     }
     let used = 0;
@@ -530,7 +560,7 @@
     if (q.hint) {
       const hintBtn = el('button', 'link');
       hintBtn.textContent = '探し方のヒントを見る';
-      hintBtn.addEventListener('click', () => { sec.appendChild(hintBlock(q.hint)); hintBtn.remove(); });
+      hintBtn.addEventListener('click', () => { addHint(sec, q.hint); hintBtn.remove(); });
       sec.appendChild(hintBtn);
     }
     return sec;
@@ -621,8 +651,6 @@
     if (st.labelEl) st.labelEl.textContent = r.label;
     const item = st.view.item;
     const shownAs = (k, i) => (item.blanks[k].labels ? item.blanks[k].labels[i] : item.blanks[k].options[i]);
-    // 合っていた空欄の理由は、折りたたんだ解説の中に回す
-    const quietWhys = [];
     (r.blanks || []).forEach((b, k) => {
       const span = st.blankEls[k];
       if (span) {
@@ -637,18 +665,12 @@
       });
       const box = st.blankBoxes[k];
       if (!box) return;
-      const why = el('div', 'wtext', `<code>${esc(b.answer)}</code> になる理由: ${esc(b.why || '')}`);
+      // 合っていたときは、なぜそのコードになるかの1文だけ。違った・わからないときは、選んだものが違う理由も添える
       const res = resultBlock(b.correct);
-      if (b.correct) {
-        if (b.why) quietWhys.push(why);
-        if (b.calc) quietWhys.push(textBlock('small', `計算: ${b.calc}`));
-      } else {
-        // 予想が外れた・わからないときだけ、理由をその場で見せる
-        if (b.why) res.appendChild(why);
-        if (b.calc) res.appendChild(textBlock('', `計算: ${b.calc}`));
-        if (b.chosen >= 0 && b.note) res.appendChild(el('div', 'wtext', `選んだ <code>${esc(shownAs(k, b.chosen))}</code> は: ${esc(b.note)}`));
-      }
-      box.appendChild(res);
+      if (b.why) res.appendChild(b.correct ? textBlock('', b.why) : el('div', 'wtext', `<code>${esc(b.answer)}</code> になる理由: ${esc(b.why)}`));
+      if (b.calc) res.appendChild(textBlock('', `計算: ${b.calc}`));
+      if (!b.correct && b.chosen >= 0 && b.note) res.appendChild(el('div', 'wtext', `選んだ <code>${esc(shownAs(k, b.chosen))}</code> は: ${esc(b.note)}`));
+      if (hasBody(res)) box.appendChild(res);
     });
     const rq = r.question;
     if (rq && rq.form === 'review') {
@@ -667,15 +689,14 @@
       });
       // どれが該当するかは選択肢の色で示す (違っていたときに、同じ内容を文章で繰り返さない)
       const res = resultBlock(rq.correct);
-      if (!rq.correct) res.appendChild(textBlock('', '該当するものは、緑の枠で示しています。'));
-      st.nextBox.appendChild(res);
+      if (rq.brief) res.appendChild(textBlock('', rq.brief));
+      if (hasBody(res)) st.nextBox.appendChild(res);
     }
     const d = r.detail;
-    if (d && (d.explanation || (d.diffs || []).length || quietWhys.length)) {
+    if (d && (d.explanation || (d.diffs || []).length)) {
       // 変更の理由・役割・差分は、予想を正す情報ではないので、いつでも開けるよう折りたたんで添える
       // 変更の理由は、目的の1行と空欄の理由で言っているので繰り返さない。差分は、変更前のコードを見られる唯一の場所
       const box = fold((d.diffs || []).length ? 'くわしく: この変更の役割と、変更前との違い' : 'くわしく: このコードの役割', false);
-      quietWhys.forEach((n) => box.appendChild(n));
       if (d.explanation) {
         const sec = section(reading ? 'このコードの役割' : 'この変更の役割');
         sec.appendChild(textBlock('', d.explanation));
@@ -799,13 +820,11 @@
         if (i === b.correctIndex) o.classList.add('ok');
         else if (i === b.chosen) o.classList.add('attn');
       });
+      // 解説は、その部品がある場所だけ (開いて確かめられる)
       const res = resultBlock(b.correct);
-      if (!b.correct) {
-        // 外れた・わからないときは、その部品がある場所を示す (開いて確かめられる)
-        const d = el('div', 'wtext', `<code>${esc(b.answer)}</code> の場所: `);
-        d.appendChild(fileLink(b.where.path, b.where.line));
-        res.appendChild(d);
-      }
+      const d = el('div', 'wtext', `<code>${esc(b.answer)}</code> の場所: `);
+      d.appendChild(fileLink(b.where.path, b.where.line));
+      res.appendChild(d);
       st.boxes[k].appendChild(res);
     });
     addNext(w, st.card, r.kind === 'reading' ? '回答を見る' : '変更の全体像へ');
@@ -995,7 +1014,8 @@
         streaming = null;
         break;
       case 'usage':
-        $('meta').textContent = `${(ev.usage.inputTokens / 1000).toFixed(1)}k tokens`;
+        // 使ったトークン数は、テストモードのときだけ見せる
+        $('meta').textContent = state.testMode ? `${(ev.usage.inputTokens / 1000).toFixed(1)}k tokens` : '';
         break;
       case 'info':
       case 'error':

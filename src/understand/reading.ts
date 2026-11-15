@@ -105,6 +105,7 @@ function readingPrompt(deps: ReadingDeps, ranges: string[]): string {
     '【空欄 blanks の指定】',
     '- line: ファイルの行番号。',
     '- target: その行に逐語で含まれる、空欄にする部分(1行以内・60文字以内)。行全体ではなく、条件式・呼び出し・引数・代入値・型など意味のある単位。',
+    '- why(答え合わせの後に表示): なぜそのコードになるかを、1文でごく短く。合っていたときも、この1文だけを見せる。',
     `- 個数と難しさは下の【利用者のレベル】に従う(1件あたり最大${profile.maxBlanks}個)。周囲のコードと手がかりから一つに絞れる箇所を選ぶ。`,
     '',
     ...distractorRules(profile.optionCount - 1),

@@ -266,8 +266,6 @@ details.more > * + * { margin-top: 6px; }
 .qhead { align-items: baseline; font-size: 1em; }
 .qhead .qtext { font-weight: 600; overflow-wrap: anywhere; }
 .qhead .qno { margin-right: 4px; }
-.wtext.verdict { font-weight: 600; }
-.kbox.res.ok .verdict { color: var(--vscode-testing-iconPassed, #3fb950); }
 .maprow .ktag { margin-left: auto; }
 .maprow .mlabel { min-width: 0; overflow-wrap: anywhere; }
 .fname { font-family: var(--vscode-editor-font-family, monospace); font-size: 0.95em; overflow-wrap: anywhere; }
@@ -278,3 +276,11 @@ details.more > * + * { margin-top: 6px; }
 @keyframes pulse { 0% { box-shadow: 0 0 0 0 var(--vscode-focusBorder); } 100% { box-shadow: 0 0 0 8px transparent; } }
 .pulse { animation: pulse 0.7s ease-out 1; }
 @media (prefers-reduced-motion: reduce) { .pulse { animation: none; } }
+
+/* 1つの問いのヒントは1つの箱にまとめ、ヒントどうしは細い線で区切る */
+.kbox.hint { gap: 0; }
+.kbox.hint .ktag { margin-bottom: 4px; }
+.hitem { padding: 4px 0; }
+.hitem + .hitem { border-top: 1px solid var(--vscode-widget-border, rgba(128,128,128,.3)); }
+/* 末尾の短いステップを画面の上に合わせるための余白 (高さは画面側で決める) */
+.wtail { flex: none; }

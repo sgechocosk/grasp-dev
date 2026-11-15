@@ -67,7 +67,6 @@ export class UnderstandSession {
   private held?: { changes: FileChange[]; unheld: string[] };
   private walk?: Walk;
   private walkCount = 0;
-  private note = '';
 
   constructor(private o: SessionOptions) {}
 
@@ -79,13 +78,6 @@ export class UnderstandSession {
   /** たどっている途中の手順があるか */
   get walking(): boolean {
     return !!this.walk;
-  }
-
-  /** 次の依頼の前に、モデルへ伝えること (変更を破棄したとき)。読むと消える */
-  takeNote(): string {
-    const n = this.note;
-    this.note = '';
-    return n;
   }
 
   /** 実行の前に呼ぶ。続けられないときは例外 (その理由を利用者に見せる) */
@@ -268,6 +260,7 @@ export class UnderstandSession {
     for (const c of changes) if (plan.merged.includes(c.rel)) this.o.state.fileState.delete(c.path);
     this.held = undefined;
     this.baseline = undefined;
+    this.forget();
     const notes = [
       plan.merged.length > 0 ? `あとから書き換えられた内容と合わせて反映したファイル: ${plan.merged.join(', ')}。` : '',
       overwrite && plan.conflicts.length > 0 ? `あとから書き換えられた内容を上書きしたファイル: ${plan.conflicts.join(', ')}。` : '',
@@ -275,15 +268,23 @@ export class UnderstandSession {
     this.closeWalk('applied', [`${changes.length}個のファイルに変更を反映しました。`, ...notes].join('\n'));
   }
 
+  /**
+   * 反映・破棄で1つの依頼が終わったら、モデルとの会話の履歴を捨てる。
+   * 次の依頼は新しい会話として始まるので、終わった依頼の調査や編集のやり取りを送り直さずに済む (API の使用量を抑える)。
+   * 読んだファイルの記録も捨てる (モデルはもう内容を覚えていないので、編集の前に読み直させる)。画面の表示は消さない。
+   */
+  private forget(): void {
+    this.o.state.messages = [];
+    this.o.state.fileState.clear();
+  }
+
   /** 取り置いた変更を捨てる (ファイルは変更前のまま) */
   async discard(): Promise<void> {
     if (!this.held) return;
-    for (const c of this.held.changes) this.o.state.fileState.delete(c.path);
-    this.note =
-      'Note: the user reviewed and DISCARDED all file changes made in the previous task. The workspace files are back in their original state, ' +
-      'so those changes do not exist. Read files again before editing them.';
     this.held = undefined;
     this.baseline = undefined;
+    // 履歴ごと捨てるので、破棄したことをモデルに伝える必要は無い (捨てた変更を、モデルはもう知らない)
+    this.forget();
     this.closeWalk('discarded', '変更を破棄しました。');
   }
 

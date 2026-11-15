@@ -21,6 +21,18 @@ import type { HostMessage, PermissionView, TranscriptItem, ViewState, WebviewMes
 const SECRET_KEY = 'graspDev.openaiApiKey';
 const MODE_KEY = 'graspDev.permissionMode';
 const LEVEL_KEY = 'graspDev.level';
+
+/** 出力パネルに残す、利用者の操作の名前。ここに無い種類のメッセージ (画面の準備・ファイルを開くなど) は記録しない */
+const OPERATIONS: Partial<Record<WebviewMessage['type'], (m: any) => string>> = {
+  send: () => '依頼を送信',
+  stop: () => '停止',
+  ask_response: () => '実装の前に決めることに回答',
+  walk_answer: (m) => `問いに回答(${Number(m.index) + 1}番目)`,
+  walk_recap_answer: () => 'まとめの問いに回答',
+  walk_next: () => '次へ進む',
+  walk_apply: (m) => (m.overwrite ? '上書きして反映' : '反映'),
+  walk_discard: () => '破棄',
+};
 const TEST_MODE_KEY = 'graspDev.testMode';
 /** 画面の画像を最後に保存したフォルダー (次に保存するときの初期位置) */
 const CAPTURE_DIR_KEY = 'graspDev.captureDir';
@@ -145,6 +157,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   // ---- Webview とのやり取り ----
 
   private async onMessage(m: WebviewMessage): Promise<void> {
+    // 利用者の操作を、時刻つきで出力パネルに残す (何を選んだか・何を書いたかは記録しない)
+    const operation = OPERATIONS[m.type]?.(m as any);
+    if (operation) this.writeLog(`操作 ${operation}`);
     switch (m.type) {
       case 'ready': return this.postInit();
       case 'send': return this.send(m.text);
@@ -210,6 +225,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     try {
       provider = observeProvider(this.providers.create(CONFIG.provider, { apiKey, baseUrl: CONFIG.baseUrl }), {
         log: (line) => this.writeLog(line),
+        tokens: () => this.testMode(),
         confirm: (info) => this.confirmCall(info),
       });
     } catch (e) {
@@ -250,8 +266,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         rgPath: this.rgPath,
         emit: (e) => this.onAgentEvent(e),
       });
-      const note = session.takeNote();
-      await agent.run((note ? `${note}\n\n` : '') + text + ideContext(), run.signal);
+      await agent.run(text + ideContext(), run.signal);
 
       // 実行を止めたあとでも、変更の取り置きは最後まで行う
       const after = new AbortController();

@@ -336,7 +336,7 @@ function makeSession(cwd: string, state: ConversationState) {
 
 async function runWith(session: UnderstandSession, cwd: string, provider: Scripted, state: ConversationState, request: string, failed = false, level: LearnerLevel = 'intermediate') {
   await session.beginRun();
-  await makeAgent(cwd, provider, state, (e) => session.record(e)).run(session.takeNote() + request, signal());
+  await makeAgent(cwd, provider, state, (e) => session.record(e)).run(request, signal());
   const asker = createAsker({ provider, model: 'm', system: 'sys', messages: () => state.messages });
   return session.endRun({ request, asker, level, signal: signal(), failed });
 }
@@ -401,6 +401,8 @@ test('実装の依頼: 変更を取り置き、確定したコードから問い
   const correctIndex = item.blanks[0].options.indexOf('(1 + rate)');
   assert.deepEqual(reveal.view.blanks, [{ correct: false, unknown: false, answer: '(1 + rate)', chosen: wrong, correctIndex, why: '税率を足した倍率を掛ける', note: '値引きになる', calc: '' }]);
   assert.equal(reveal.view.question.correct, true);
+  // 合っていたときに見せる、ごく短い解説
+  assert.equal(reveal.view.question.brief, 'calcPrice を使っているので、合わせて変える必要がある。');
   // 折りたたんで添えるのは、この変更の役割と、変更前との違い。変更の理由は、目的の1行と空欄の理由で言っているので繰り返さない
   assert.deepEqual(Object.keys(reveal.view.detail), ['explanation', 'diffs']);
   assert.deepEqual([reveal.view.detail.diffs[0].path, reveal.view.detail.diffs[0].line], ['src/price.ts', 1]);
@@ -467,6 +469,9 @@ test('実装の依頼: 変更を取り置き、確定したコードから問い
 
   await session.apply();
   assert.equal(posted[posted.length - 1].type, 'walk_done');
+  // 反映すると、モデルとの会話の履歴と、読んだファイルの記録を捨てる
+  assert.deepEqual(state.messages, []);
+  assert.equal(state.fileState.size, 0);
   assert.match(read(cwd, 'src/price.ts'), /amount \* \(1 \+ rate\)/);
   assert.match(read(cwd, 'src/cart.ts'), /calcPrice\(item, 0\.1\)/);
   assert.equal(read(cwd, 'gen.txt'), 'generated\n');
@@ -653,11 +658,12 @@ test('取り置き中に続きを頼むと変更を戻して続け、破棄す�
   const start = [...posted].reverse().find((m) => m.type === 'walk_start') as any;
   assert.equal(start.view.files, 3);
 
+  // 破棄すると、モデルとの会話の履歴も捨てる (次の依頼は新しい会話として始まり、終わった依頼のやり取りを送り直さない)
+  assert.ok(state.messages.length > 0);
   await session.discard();
   assert.equal(status(cwd), '');
-  assert.match(session.takeNote(), /DISCARDED/);
-  assert.equal(session.takeNote(), '');
-  assert.ok(!state.fileState.has(price));
+  assert.deepEqual(state.messages, []);
+  assert.equal(state.fileState.size, 0);
 });
 
 test('手順を作ったあとに書き換えられたファイル: 重ならなければ合わせて反映し、重なれば利用者が選ぶ', async () => {
@@ -690,7 +696,7 @@ test('手順を作ったあとに書き換えられたファイル: 重ならな
     assert.match(read(cwd, 'src/cart.ts'), /calcPrice\(item, 0\.1\)[\s\S]*\/\/ edited by user\n$/);
     assert.match(read(cwd, 'src/price.ts'), /rate: number/);
     // 合わせたファイルは、モデルが見た内容と違うので、読み直させる
-    assert.ok(!state.fileState.has(path.join(cwd, 'src/cart.ts')));
+    assert.equal(state.fileState.size, 0);
   }
 
   // 変更と同じ行を書き換えた: 何も書き込まずに知らせ、上書きするかを利用者が選ぶ

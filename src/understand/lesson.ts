@@ -58,8 +58,8 @@ export const REVIEW_PICKS = ['このままでよい', '変更が要る', '確認
 
 /** 変更の影響の問い。形は経験レベルで変わる */
 export type ImpactQuestion =
-  | { form: 'places'; prompt: string; options: string[]; correct: number[]; hint: string; secret: ImpactSecret }
-  | { form: 'lines'; prompt: string; options: Array<{ path: string; line: number; code: string }>; correct: number[]; hint: string; secret: ImpactSecret }
+  | { form: 'places'; prompt: string; options: string[]; correct: number[]; hint: string; brief: string; secret: ImpactSecret }
+  | { form: 'lines'; prompt: string; options: Array<{ path: string; line: number; code: string }>; correct: number[]; hint: string; brief: string; secret: ImpactSecret }
   | { form: 'review'; prompt: string; sites: ReviewSite[] };
 
 /** 答える前の文章に出てはいけない、影響の問いの答え (関数などの名前と、ファイル) */
@@ -309,6 +309,7 @@ function quizPrompt(deps: LessonDeps, targets: Step[]): string {
     '【空欄 blanks の指定】',
     '- line: 変更後のコード(行番号付きで示す)の中での行番号(1始まり)。',
     '- target: その行に逐語で含まれる、空欄にする部分(1行以内・60文字以内)。行全体ではなく、条件式・呼び出し・引数・代入値など意味のある単位。',
+    '- why(答え合わせの後に表示): なぜそのコードになるかを、1文でごく短く。合っていたときも、この1文だけを見せる。',
     '- 少なくとも1つは、変更・追加した行(差分の + の行)に置く。「なぜその場所をそう変えるのか」「何に合わせるのか」が問われる箇所を選ぶ。',
     `- 個数と難しさは下の【利用者のレベル】に従う(1ステップあたり最大${profile.maxBlanks}個)。`,
     '',
@@ -553,6 +554,8 @@ export function impactQuestion(step: Step, steps: Step[], obligations: Obligatio
   );
   // ヒントは、何が変わったので、どんな場所を探せばよいかを、変わった名前を挙げて言う
   const hint = [...new Set(changed.map((c) => PATTERNS[c.o.pattern].why(c.o.subject)))].join('\n');
+  // 答え合わせで見せる、ごく短い解説: 該当する場所は、変わった名前を使っている
+  const briefOf = (picked: Array<{ o: Obligation }>): string => `${[...new Set(picked.map((c) => c.o.subject))].join('・')} を使っているので、合わせて変える必要がある。`;
   const secretOf = (sites: Site[]): ImpactSecret => ({
     names: [...new Set(sites.map((s) => s.symbol).filter((n): n is string => !!n))],
     paths: [...new Set(sites.map((s) => s.path))].filter((p) => !step.edits.some((e) => e.path === p)),
@@ -566,7 +569,7 @@ export function impactQuestion(step: Step, steps: Step[], obligations: Obligatio
       const options = shuffle([answer, ...wrong.map((p) => ({ path: p.path, line: p.line, code: p.code }))], rng);
       return {
         form: 'lines', prompt: 'この変更に合わせて、ほかに変える必要があるのはどの行ですか?', options, correct: [options.indexOf(answer)], hint,
-        secret: secretOf([first.site]),
+        brief: briefOf([first]), secret: secretOf([first.site]),
       };
     }
   }
@@ -584,6 +587,7 @@ export function impactQuestion(step: Step, steps: Step[], obligations: Obligatio
     options,
     correct: labels.map((c) => options.indexOf(c)).sort((a, b) => a - b),
     hint,
+    brief: briefOf(changed.filter((c) => labels.includes(placeLabel(c.site)))),
     secret: secretOf(changed.filter((c) => labels.includes(placeLabel(c.site))).map((c) => c.site)),
   };
 }
@@ -919,7 +923,7 @@ export function revealPayload(lesson: Lesson, index: number, answer: StepAnswer)
   } else if (q) {
     const picked = answer.nextUnknown ? [] : [...new Set(answer.next)].filter((i) => Number.isInteger(i) && i >= 0 && i < q.options.length).sort((a, b) => a - b);
     const predicted = picked.length === q.correct.length && picked.every((c, k) => c === q.correct[k]);
-    question = { form: q.form, correct: predicted, unknown: !!answer.nextUnknown, correctIndexes: q.correct, chosen: picked };
+    question = { form: q.form, correct: predicted, unknown: !!answer.nextUnknown, correctIndexes: q.correct, chosen: picked, brief: q.brief };
   }
   const checks = lesson.obligations
     .filter((o) => o.step === s.id)
