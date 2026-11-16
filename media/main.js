@@ -93,8 +93,7 @@
   }
   function append(node) {
     const stick = nearBottom();
-    // たどる手順の末尾に置いた余白は、続きが足されたら要らない
-    if (typeof dropTail === 'function') dropTail();
+    if (typeof dropSpace === 'function') dropSpace();
     messagesEl.appendChild(node);
     if (stick) messagesEl.scrollTop = messagesEl.scrollHeight;
     return node;
@@ -240,7 +239,7 @@
   const UNKNOWN = -2; // 「わからない」を選んだことを表す、選択肢の番号
   const VERDICT = { changed: '変更が必要', checked: '変更は不要' };
   const WHOLE_FILE_LINES = 8; // 新しいファイル・消すファイルの差分で、最初に見せる行数
-  const TOP_GAP = 20; // ステップを上に合わせたときの、上の余白と会話の欄の内側の余白
+  const TOP_GAP = 20; // 会話の欄の内側の余白 (ステップが画面に収まるかの判定に使う)
   const walks = new Map(); // walk の番号 → { el, kind, steps: Map(index → stepState) }
 
   function fileLink(path, line, text) {
@@ -347,25 +346,38 @@
     }
     return box;
   }
-  /** 次のステップへは、画面をなめらかに動かす。続けて流しているステップでは、最初の1つにだけ合わせる (利用者が操作するまで動かさない) */
-  function reveal(w, node) {
-    fitTail(node);
-    if (!w.hold) glide(node);
-  }
   /**
-   * 新しいステップを、いつも画面のいちばん上に合わせられるようにする。
-   * 会話の末尾にある短いステップは、その下に続きが無いと上まで動かせないので、足りない高さを末尾の余白で補う。
-   * 余白は、その下に何かが足されたら消す (append)。
+   * 次のステップへは、画面をなめらかに動かす (余白は足さない)。
+   * - 手順の最初は、全体の流れ (要件の整理・ステップの一覧) が画面のいちばん上に来るようにする。
+   *   その下の内容が短くて上まで動かせないときだけ、足りない高さを末尾の余白で補う (次のステップを出すときに消す)
+   * - 画面に収まる短いステップは、会話のいちばん下まで動かす (余白は足さない。ステップ全体が見える)
+   * - 収まらない長いステップは、ステップのいちばん上に合わせる
+   * 続けて流しているステップでは、最初の1つにだけ合わせる (利用者が操作するまで動かさない)
    */
-  const tail = el('div', 'wtail');
-  function fitTail(node) {
-    tail.style.height = '0px';
-    messagesEl.appendChild(tail);
-    const below = tail.getBoundingClientRect().top - node.getBoundingClientRect().top;
-    tail.style.height = `${Math.max(0, Math.ceil(messagesEl.clientHeight - below - TOP_GAP))}px`;
+  function reveal(w, node) {
+    if (!w.started) {
+      w.started = true;
+      if (w.head) {
+        addSpace(w.head);
+        glide(w.head);
+      }
+      return;
+    }
+    dropSpace();
+    if (w.hold) return;
+    if (node.offsetHeight <= messagesEl.clientHeight - TOP_GAP) messagesEl.scrollTo({ top: messagesEl.scrollHeight, behavior: calm ? 'auto' : 'smooth' });
+    else glide(node);
   }
-  function dropTail() {
-    tail.style.height = '0px';
+
+  const space = el('div', 'wspace');
+  function addSpace(node) {
+    space.style.height = '0px';
+    messagesEl.appendChild(space);
+    const below = space.getBoundingClientRect().top - node.getBoundingClientRect().top;
+    space.style.height = `${Math.max(0, Math.ceil(messagesEl.clientHeight - below - TOP_GAP))}px`;
+  }
+  function dropSpace() {
+    space.remove();
   }
 
   /** 空欄つきのコード。離れた行は折りたたむ */
@@ -936,7 +948,8 @@
       const v = m.view;
       const box = el('div', 'walk');
       box.dataset.walk = String(m.walk);
-      const w = { el: box, kind: v.kind, steps: new Map(), hold: false };
+      // started: 最初のステップを出したか (最初だけは、全体の流れを画面の上に合わせる)
+      const w = { el: box, kind: v.kind, steps: new Map(), hold: false, started: false };
       walks.set(m.walk, w);
       setWalking(true);
       const head = el('section', 'wstep wstart');
@@ -959,6 +972,7 @@
         });
         head.appendChild(sec);
       }
+      w.head = head;
       box.appendChild(head);
       append(box);
       head.scrollIntoView({ block: 'start' });
@@ -1125,10 +1139,13 @@
     const { box } = entry;
     if (m.error) box.appendChild(textBlock('attn', m.error));
     else box.appendChild(el('div', 'wtext qanswer', renderMarkdown(m.text || '')));
-    const close = el('button', 'link');
+    // 閉じるボタンは、質問を入力していたときの「閉じる」と同じ見た目で、右に寄せる
+    const row = el('div', 'qrow');
+    const close = el('button', 'secondary');
     close.textContent = '閉じる';
     close.addEventListener('click', () => box.remove());
-    box.appendChild(close);
+    row.appendChild(close);
+    box.appendChild(row);
   }
 
   // ---------- 入力欄の表示 ----------
