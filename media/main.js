@@ -364,9 +364,20 @@
       return;
     }
     dropSpace();
+    w.settled = null;
     if (w.hold) return;
-    if (node.offsetHeight <= messagesEl.clientHeight - TOP_GAP) messagesEl.scrollTo({ top: messagesEl.scrollHeight, behavior: calm ? 'auto' : 'smooth' });
-    else glide(node);
+    if (fits(node)) {
+      toBottom();
+      // 問いの無いステップには、答え合わせ (くわしく・次へのボタン) がすぐに続けて足される。足されたら、もう一度いちばん下まで動かす (addReveal)
+      w.settled = node;
+    } else glide(node);
+  }
+  /** そのステップが、会話の欄に収まるか */
+  function fits(node) {
+    return node.offsetHeight <= messagesEl.clientHeight - TOP_GAP;
+  }
+  function toBottom() {
+    messagesEl.scrollTo({ top: messagesEl.scrollHeight, behavior: calm ? 'auto' : 'smooth' });
   }
 
   const space = el('div', 'wspace');
@@ -648,6 +659,8 @@
     st.reveal = el('div', 'wreveal');
     card.appendChild(st.reveal);
     st.card = card;
+    // 問いの無いステップ (答え合わせが、利用者の操作なしに続けて届く)
+    st.auto = gates.length === 0;
     w.steps.set(v.index, st);
     w.el.appendChild(card);
     reveal(w, card);
@@ -747,9 +760,13 @@
       st.reveal.appendChild(box);
     }
     // 続けて流しているステップには、進むボタンを置かない (次の問い・まとめ・最後まで自動で進む)
-    if (r.flow) return;
-    const end = r.recap ? 'まとめへ' : reading ? '回答を見る' : '変更の全体像へ';
-    addNext(w, st.card, r.last ? end : reading ? '次の読みどころへ' : '次のステップへ');
+    if (!r.flow) {
+      const end = r.recap ? 'まとめへ' : reading ? '回答を見る' : '変更の全体像へ';
+      addNext(w, st.card, r.last ? end : reading ? '次の読みどころへ' : '次のステップへ');
+    }
+    // 問いの無いステップをいちばん下まで動かしたあとに、答え合わせが足された: 足した分も見えるよう、もう一度いちばん下まで動かす
+    // (足して画面に収まらなくなったときは、ステップの上端がずれないよう、動かさない)
+    if (st.auto && w.settled === st.card && fits(st.card)) toBottom();
   }
 
   function addNext(w, card, label) {
