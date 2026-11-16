@@ -197,6 +197,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       case 'walk_next':
         this.session?.next();
         return;
+      case 'walk_question':
+        return this.answerQuestion(m);
       case 'walk_apply':
         if (!this.abort) await this.session?.apply(!!m.overwrite).catch((e) => this.onAgentEvent({ type: 'error', message: `反映に失敗しました: ${(e as Error).message}` }));
         return this.postState();
@@ -305,6 +307,21 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.post({ type: 'walk', message });
     // 質問への回答は、問いをたどり終えてから見せる。実装の報告は見せない (手順そのものが説明になっている)
     if (message.type === 'walk_done' && message.outcome === 'read') this.showAnswer();
+  }
+
+  /**
+   * 手順の途中の質問に答える。答えは質問した場所にだけ出し、会話の記録には残さない。
+   * 手順の進み方・エージェントの会話には関わらないので、ほかの操作と並んで動いてよい。
+   */
+  private async answerQuestion(m: Extract<WebviewMessage, { type: 'walk_question' }>): Promise<void> {
+    const id = String(m.id ?? '');
+    try {
+      if (!this.session) throw new Error('この手順はもう終わっているため、質問できません。');
+      const text = await this.session.question(Number(m.walk), m.target, m.selection, m.question);
+      this.post({ type: 'walk_question_answer', id, text });
+    } catch (e) {
+      this.post({ type: 'walk_question_answer', id, error: (e as Error)?.message ?? String(e) });
+    }
   }
 
   /** 最後の応答の文章を会話に出す */

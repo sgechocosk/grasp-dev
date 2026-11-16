@@ -8,6 +8,8 @@ import {
 } from './lesson';
 import type { LearnerLevel } from './lib/level';
 import type { Asker } from './llm';
+import { answerQuestion } from './question';
+import { coerceTarget, questionContext } from './questionContext';
 import { buildReading, readingRevealPayload, readingStartPayload, readingStepPayload, type Reading } from './reading';
 import { Recorder } from './recorder';
 
@@ -52,6 +54,11 @@ interface Walk {
   recap?: 'asked' | 'shown';
   /** 利用者が「妥当」以外を選んだ場所 (最後のまとめで見せる) */
   concerns: Concern[];
+  /** 手順の途中の質問に答えるための問い合わせ先と、経験レベル */
+  asker: Asker;
+  level: LearnerLevel;
+  /** 回答を作っている途中の質問 (手順が終わったら取りやめる) */
+  questions: Set<AbortController>;
 }
 
 /**
@@ -122,7 +129,7 @@ export class UnderstandSession {
       const reading = await buildReading({ cwd: this.o.cwd, request: opts.request, recorder, asker: opts.asker, level: opts.level, signal: opts.signal, onStatus: this.o.status })
         .catch(() => undefined);
       if (!reading) return false;
-      this.walk = { id: ++this.walkCount, content: reading, index: 0, answered: false, final: false, concerns: [] };
+      this.walk = { id: ++this.walkCount, content: reading, index: 0, answered: false, final: false, concerns: [], asker: opts.asker, level: opts.level, questions: new Set() };
       this.o.post({ type: 'walk_start', walk: this.walk.id, view: readingStartPayload(reading) });
       this.postStep();
       return true;
@@ -145,7 +152,7 @@ export class UnderstandSession {
     if (committed) {
       lesson.notice = [lesson.notice, '作業の中でコミットが行われています。変更を破棄しても、そのコミットは残ります。'].filter(Boolean).join('\n');
     }
-    this.walk = { id: ++this.walkCount, content: lesson, index: 0, answered: false, final: false, concerns: [] };
+    this.walk = { id: ++this.walkCount, content: lesson, index: 0, answered: false, final: false, concerns: [], asker: opts.asker, level: opts.level, questions: new Set() };
     this.o.post({ type: 'walk_start', walk: this.walk.id, view: startPayload(lesson) });
     if (lesson.steps.length > 0) this.postStep();
     else this.postFinal();
@@ -224,6 +231,32 @@ export class UnderstandSession {
     else this.afterSteps();
   }
 
+  /**
+   * 手順の途中で、利用者が画面の一部を選んでした質問に答える (用語の確認・仕組みの解説)。
+   * 手順の進み具合・エージェントの会話・ファイルには触れないので、このあとのステップには影響しない。
+   * まだ答え合わせをしていない問いの答えは、回答から除く。
+   */
+  async question(walkId: number, target: unknown, selection: string, question: string): Promise<string> {
+    const walk = this.walk;
+    if (!walk || walk.id !== walkId) throw new Error('この手順はもう終わっているため、質問できません。');
+    const t = coerceTarget(target, walk.content);
+    if (!t) throw new Error('質問の対象が見つかりません。');
+    const context = questionContext(walk.content, walk, t);
+    const controller = new AbortController();
+    walk.questions.add(controller);
+    try {
+      return await answerQuestion({
+        asker: walk.asker, level: walk.level, ...context,
+        selection: String(selection ?? ''), question: String(question ?? ''), signal: controller.signal,
+      });
+    } catch (e) {
+      if (controller.signal.aborted) throw new Error('手順が終わったため、回答を取りやめました。');
+      throw e;
+    } finally {
+      walk.questions.delete(controller);
+    }
+  }
+
   private finishReading(message: string): void {
     this.closeWalk('read', message);
   }
@@ -232,6 +265,7 @@ export class UnderstandSession {
     const walk = this.walk;
     if (!walk) return;
     this.walk = undefined;
+    for (const c of walk.questions) c.abort();
     this.o.post({ type: 'walk_done', walk: walk.id, outcome, message });
   }
 

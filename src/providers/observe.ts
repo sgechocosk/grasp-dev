@@ -24,6 +24,8 @@ const PURPOSES: Record<string, string> = {
   reading_quiz: '読んだコードからの問いの作成',
   leak_fix: '答えを含む説明文の書き直し',
   voice_fix: '説明文の言い回しの書き直し',
+  step_question: '手順の途中の質問への回答',
+  step_question_history: '手順の途中の質問への回答(作業の経緯から)',
 };
 
 /** 大まかなトークン数 (ASCII は約3.5文字で1トークン、日本語などは1文字で1トークン) */

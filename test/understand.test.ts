@@ -792,3 +792,58 @@ test('読んだコードも変更も無い応答は、そのまま表示する',
   assert.equal(await runWith(session, cwd, scripted([reply('こんにちは。')]), state, 'こんにちは'), false);
   assert.deepEqual(posted, []);
 });
+
+test('手順の途中の質問: 進み方と会話を変えずに答え、答え合わせ前の問いの答えは回答から除く', async () => {
+  const cwd = makeRepo();
+  const state = createConversationState();
+  // 質問への回答は、テストごとに差し替える
+  let answer: unknown = {};
+  const prompts: Record<string, string> = {};
+  const provider = scripted(changeScript(cwd), (name, prompt) => {
+    if (name === 'step_question' || name === 'step_question_history') {
+      prompts[name] = prompt;
+      return typeof answer === 'function' ? (answer as (n: string) => unknown)(name) : answer;
+    }
+    return lessonJson(name, prompt);
+  });
+  const { session, posted } = makeSession(cwd, state);
+  assert.equal(await runWith(session, cwd, provider, state, '税率を引数にして'), true);
+  const walkId = (posted[0] as any).walk;
+  const history = JSON.stringify(state.messages);
+  const count = posted.length;
+
+  // 答える前: 材料は画面と同じ空欄つきのコードで、答えのコードは渡さない
+  answer = { answer: '税込みは、税を含めた金額のこと。ここは (1 + rate) を掛ける。cartTotal からも呼ばれている。', needsHistory: false };
+  const before = await session.question(walkId, { kind: 'step', index: 0 }, '税込み', 'これは何?');
+  assert.equal(before, '税込みは、税を含めた金額のこと。');
+  assert.ok(prompts.step_question.includes('amount * ［1］'));
+  assert.ok(prompts.step_question.includes('「税込み」'));
+  assert.ok(!prompts.step_question.includes('amount * (1 + rate)'), '答えのコードを材料に入れている');
+  // 答えしか書いていなければ、説明を控える旨を返す
+  answer = { answer: '(1 + rate) が入る。', needsHistory: false };
+  assert.match(await session.question(walkId, { kind: 'step', index: 0 }, '［1］', '答えは?'), /説明を控えます/);
+  // 質問は、手順の進み具合・画面・エージェントの会話を変えない
+  assert.equal(posted.length, count);
+  assert.equal(JSON.stringify(state.messages), history);
+  assert.equal(provider.asked.includes('step_question_history'), false);
+
+  // 答え合わせのあと: 答えを含めて説明できる。作業の経緯が要る質問は、作業した本人の会話に聞く
+  const item = (posted[1] as any).view.item;
+  session.answer(0, { blanks: [item.blanks[0].options.indexOf('(1 + rate)')], next: [] });
+  answer = (name: string) => (name === 'step_question' ? { answer: '', needsHistory: true } : { answer: '税率を足した倍率として (1 + rate) を掛けるため。' });
+  assert.equal(await session.question(walkId, { kind: 'step', index: 0 }, 'rate', 'なぜこう変えた?'), '税率を足した倍率として (1 + rate) を掛けるため。');
+  assert.ok(provider.asked.includes('step_question_history'));
+  assert.ok(prompts.step_question.includes('amount * (1 + rate)'));
+  assert.equal(JSON.stringify(state.messages), history);
+
+  // 進み方は、質問の前と同じように続けられる
+  const shown = posted.length;
+  session.next();
+  const nextStep = posted.slice(shown).find((m) => m.type === 'walk_step') as any;
+  assert.equal(nextStep?.view.index, 1);
+
+  // 対象が無い・手順が終わったあとは答えない
+  await assert.rejects(session.question(walkId, { kind: 'step', index: 99 }, 'x', ''), /対象が見つかりません/);
+  await session.discard();
+  await assert.rejects(session.question(walkId, { kind: 'step', index: 0 }, 'x', ''), /もう終わっている/);
+});

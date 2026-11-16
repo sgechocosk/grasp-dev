@@ -93,8 +93,7 @@
   }
   function append(node) {
     const stick = nearBottom();
-    // たどる手順の末尾に置いた余白は、続きが足されたら要らない
-    if (typeof dropTail === 'function') dropTail();
+    if (typeof dropSpace === 'function') dropSpace();
     messagesEl.appendChild(node);
     if (stick) messagesEl.scrollTop = messagesEl.scrollHeight;
     return node;
@@ -240,7 +239,7 @@
   const UNKNOWN = -2; // 「わからない」を選んだことを表す、選択肢の番号
   const VERDICT = { changed: '変更が必要', checked: '変更は不要' };
   const WHOLE_FILE_LINES = 8; // 新しいファイル・消すファイルの差分で、最初に見せる行数
-  const TOP_GAP = 20; // ステップを上に合わせたときの、上の余白と会話の欄の内側の余白
+  const TOP_GAP = 20; // 会話の欄の内側の余白 (ステップが画面に収まるかの判定に使う)
   const walks = new Map(); // walk の番号 → { el, kind, steps: Map(index → stepState) }
 
   function fileLink(path, line, text) {
@@ -258,8 +257,9 @@
   /**
    * 問い・ヒント・解説は、どこに出ても同じ見た目にする: 左の線の色と、先頭の札で区別する。
    * - 問い (q): 利用者が答えるもの  - ヒント (hint): 答える前に、求めたときだけ出る手がかり  - 解説 (res): 答えたあとに出る説明
+   * - 質問 (ask): 利用者が画面の一部を選んで聞いたことと、その回答
    */
-  const KIND_LABEL = { q: '問い', hint: 'ヒント', res: '解説' };
+  const KIND_LABEL = { q: '問い', hint: 'ヒント', res: '解説', ask: '質問' };
   function kindTag(kind) {
     return el('span', 'ktag ' + kind, KIND_LABEL[kind]);
   }
@@ -346,25 +346,49 @@
     }
     return box;
   }
-  /** 次のステップへは、画面をなめらかに動かす。続けて流しているステップでは、最初の1つにだけ合わせる (利用者が操作するまで動かさない) */
-  function reveal(w, node) {
-    fitTail(node);
-    if (!w.hold) glide(node);
-  }
   /**
-   * 新しいステップを、いつも画面のいちばん上に合わせられるようにする。
-   * 会話の末尾にある短いステップは、その下に続きが無いと上まで動かせないので、足りない高さを末尾の余白で補う。
-   * 余白は、その下に何かが足されたら消す (append)。
+   * 次のステップへは、画面をなめらかに動かす (余白は足さない)。
+   * - 手順の最初は、全体の流れ (要件の整理・ステップの一覧) が画面のいちばん上に来るようにする。
+   *   その下の内容が短くて上まで動かせないときだけ、足りない高さを末尾の余白で補う (次のステップを出すときに消す)
+   * - 画面に収まる短いステップは、会話のいちばん下まで動かす (余白は足さない。ステップ全体が見える)
+   * - 収まらない長いステップは、ステップのいちばん上に合わせる
+   * 続けて流しているステップでは、最初の1つにだけ合わせる (利用者が操作するまで動かさない)
    */
-  const tail = el('div', 'wtail');
-  function fitTail(node) {
-    tail.style.height = '0px';
-    messagesEl.appendChild(tail);
-    const below = tail.getBoundingClientRect().top - node.getBoundingClientRect().top;
-    tail.style.height = `${Math.max(0, Math.ceil(messagesEl.clientHeight - below - TOP_GAP))}px`;
+  function reveal(w, node) {
+    if (!w.started) {
+      w.started = true;
+      if (w.head) {
+        addSpace(w.head);
+        glide(w.head);
+      }
+      return;
+    }
+    dropSpace();
+    w.settled = null;
+    if (w.hold) return;
+    if (fits(node)) {
+      toBottom();
+      // 問いの無いステップには、答え合わせ (くわしく・次へのボタン) がすぐに続けて足される。足されたら、もう一度いちばん下まで動かす (addReveal)
+      w.settled = node;
+    } else glide(node);
   }
-  function dropTail() {
-    tail.style.height = '0px';
+  /** そのステップが、会話の欄に収まるか */
+  function fits(node) {
+    return node.offsetHeight <= messagesEl.clientHeight - TOP_GAP;
+  }
+  function toBottom() {
+    messagesEl.scrollTo({ top: messagesEl.scrollHeight, behavior: calm ? 'auto' : 'smooth' });
+  }
+
+  const space = el('div', 'wspace');
+  function addSpace(node) {
+    space.style.height = '0px';
+    messagesEl.appendChild(space);
+    const below = space.getBoundingClientRect().top - node.getBoundingClientRect().top;
+    space.style.height = `${Math.max(0, Math.ceil(messagesEl.clientHeight - below - TOP_GAP))}px`;
+  }
+  function dropSpace() {
+    space.remove();
   }
 
   /** 空欄つきのコード。離れた行は折りたたむ */
@@ -570,6 +594,8 @@
     const reading = w.kind === 'reading';
     const st = { view: v, chosen: [], next: new Set(), nextUnknown: false, review: [], blankEls: [], blankBoxes: [], optEls: [], locked: false, refresh: () => {} };
     const card = el('section', 'wstep');
+    card.dataset.target = 'step';
+    card.dataset.index = String(v.index);
     const head = el('div', 'whead', `<span class="wnum">${reading ? '読みどころ' : 'ステップ'} ${v.number}/${v.total}</span><span class="tag">${esc(v.kind)}</span>`);
     // どの条件・どのステップのための変更かは、文章で繰り返さず、札で示す
     if (v.origin) head.appendChild(el('span', 'tag origin', esc(v.origin)));
@@ -621,7 +647,8 @@
         st.locked = true;
         w.hold = false;
         st.refresh();
-        card.querySelectorAll('.opt, .link').forEach((b) => (b.disabled = true));
+        // 質問の欄 (.qask) は、問いに答えたあとも使えるままにする
+        card.querySelectorAll('.opt, .link').forEach((b) => { if (!b.closest('.qask')) b.disabled = true; });
         vscode.postMessage({ type: 'walk_answer', index: v.index, blanks: st.chosen, next: [...st.next], nextUnknown: st.nextUnknown, review: st.review });
       });
       st.refresh();
@@ -632,6 +659,8 @@
     st.reveal = el('div', 'wreveal');
     card.appendChild(st.reveal);
     st.card = card;
+    // 問いの無いステップ (答え合わせが、利用者の操作なしに続けて届く)
+    st.auto = gates.length === 0;
     w.steps.set(v.index, st);
     w.el.appendChild(card);
     reveal(w, card);
@@ -646,7 +675,7 @@
     st.actions.innerHTML = '';
     st.card.querySelectorAll('.opt').forEach((b) => (b.disabled = true));
     // 使わなかったヒントのリンクは片づける
-    st.card.querySelectorAll('button.link').forEach((b) => { if (!b.dataset.keep) b.remove(); });
+    st.card.querySelectorAll('button.link').forEach((b) => { if (!b.dataset.keep && !b.closest('.qask')) b.remove(); });
     // 答える前は伏せていた見出しを、全文に戻す
     if (st.labelEl) st.labelEl.textContent = r.label;
     const item = st.view.item;
@@ -731,9 +760,13 @@
       st.reveal.appendChild(box);
     }
     // 続けて流しているステップには、進むボタンを置かない (次の問い・まとめ・最後まで自動で進む)
-    if (r.flow) return;
-    const end = r.recap ? 'まとめへ' : reading ? '回答を見る' : '変更の全体像へ';
-    addNext(w, st.card, r.last ? end : reading ? '次の読みどころへ' : '次のステップへ');
+    if (!r.flow) {
+      const end = r.recap ? 'まとめへ' : reading ? '回答を見る' : '変更の全体像へ';
+      addNext(w, st.card, r.last ? end : reading ? '次の読みどころへ' : '次のステップへ');
+    }
+    // 問いの無いステップをいちばん下まで動かしたあとに、答え合わせが足された: 足した分も見えるよう、もう一度いちばん下まで動かす
+    // (足して画面に収まらなくなったときは、ステップの上端がずれないよう、動かさない)
+    if (st.auto && w.settled === st.card && fits(st.card)) toBottom();
   }
 
   function addNext(w, card, label) {
@@ -752,6 +785,7 @@
   function addRecap(w, v) {
     const st = { chosen: v.blanks.map(() => -1), slots: v.blanks.map(() => []), optEls: [], boxes: [], locked: false, refresh: () => {} };
     const card = el('section', 'wstep wrecap');
+    card.dataset.target = 'recap';
     card.appendChild(textBlock('wlabel', v.kind === 'reading' ? '仕組みをまとめる' : '変更の流れをまとめる'));
     const text = el('div', 'wtext rtext');
     v.segments.forEach((seg) => {
@@ -832,6 +866,7 @@
 
   function addFinal(w, f) {
     const card = el('section', 'wstep wfinal');
+    card.dataset.target = 'final';
     card.appendChild(textBlock('wlabel', '変更の全体像'));
     if (f.notice) card.appendChild(textBlock('attn', f.notice));
     if (f.overall) card.appendChild(textBlock('', f.overall));
@@ -929,9 +964,13 @@
     if (m.type === 'walk_start') {
       const v = m.view;
       const box = el('div', 'walk');
-      const w = { el: box, kind: v.kind, steps: new Map(), hold: false };
+      box.dataset.walk = String(m.walk);
+      // started: 最初のステップを出したか (最初だけは、全体の流れを画面の上に合わせる)
+      const w = { el: box, kind: v.kind, steps: new Map(), hold: false, started: false };
       walks.set(m.walk, w);
+      setWalking(true);
       const head = el('section', 'wstep wstart');
+      head.dataset.target = 'start';
       head.appendChild(textBlock('wlabel', v.kind === 'reading' ? '何を理解するか' : '要件の整理'));
       head.appendChild(textBlock('', v.goal));
       if (v.notice) head.appendChild(textBlock('attn', v.notice));
@@ -950,6 +989,7 @@
         });
         head.appendChild(sec);
       }
+      w.head = head;
       box.appendChild(head);
       append(box);
       head.scrollIntoView({ block: 'start' });
@@ -961,7 +1001,11 @@
     else if (m.type === 'walk_reveal') addReveal(w, m.view);
     else if (m.type === 'walk_recap') addRecap(w, m.view);
     else if (m.type === 'walk_recap_reveal') addRecapReveal(w, m.view);
-    else if (m.type === 'walk_final') addFinal(w, m.view);
+    else if (m.type === 'walk_final') {
+      addFinal(w, m.view);
+      // 最後の「変更の全体像」では、反映の前に続きの依頼を送れるよう、入力欄を戻す
+      setWalking(false);
+    }
     else if (m.type === 'walk_error') {
       if (w.errorEl) w.errorEl.textContent = m.message;
       else addNote('error', m.message);
@@ -973,8 +1017,12 @@
         w.finalActions.insertBefore(force, w.finalActions.children[1] || null);
       }
     } else if (m.type === 'walk_done') {
+      setWalking(false);
       w.el.classList.add('closed');
-      w.el.querySelectorAll('button').forEach((b) => (b.disabled = true));
+      // 送っていない質問の入力欄は片づける。回答を待っている質問は、取りやめた旨がホストから届く
+      w.el.querySelectorAll('.qask.draft').forEach((b) => b.remove());
+      hideSelAsk();
+      w.el.querySelectorAll('button, textarea').forEach((b) => (b.disabled = true));
       if (w.finalActions) w.finalActions.remove();
       if (w.errorEl) w.errorEl.textContent = '';
       if (m.message) {
@@ -983,6 +1031,152 @@
         w.el.appendChild(note);
       }
     }
+  }
+
+  // ---------- 手順の途中の質問 ----------
+  // ステップの中の文字をドラッグで選ぶと「質問する」ボタンが出て、押すとその近くに質問の入力欄を開く。
+  // 用語の確認や仕組みの解説を聞くためのもの: 手順の進み方には関わらず、コードも変えない。問いの答えは返ってこない
+  const selAskEl = el('button', 'selask');
+  selAskEl.textContent = '質問する';
+  selAskEl.hidden = true;
+  document.body.appendChild(selAskEl);
+  let selInfo = null; // 選んでいる部分 { card, anchor, text, walk }
+  let askSeq = 0;
+  const askBoxes = new Map(); // 質問の番号 → { box, wait }
+  /** 質問の欄を置く場所の目安になる、ひとまとまりの部分 (選んだ部分を含むもの) */
+  const ANCHORS = '.kbox, .qcode, .wdiff, .wtext, .maprow, .crow, .frow, .cmdrow, .site, .wfiles, details';
+  const short = (text, max) => (text.length > max ? text.slice(0, max) + '…' : text);
+
+  /** いま選んでいる部分が、たどっている途中の手順の1枚のカードの中なら、その情報を返す */
+  function selectionInWalk() {
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed || sel.rangeCount === 0) return null;
+    // 入力欄の中で選んだ文字は対象にしない
+    const active = document.activeElement;
+    if (active && (active.tagName === 'TEXTAREA' || active.tagName === 'INPUT')) return null;
+    const text = sel.toString().replace(/\s+/g, ' ').trim();
+    if (!text) return null;
+    const range = sel.getRangeAt(0);
+    const elementOf = (n) => (n && n.nodeType === 1 ? n : n && n.parentElement);
+    const start = elementOf(range.startContainer);
+    const end = elementOf(range.endContainer);
+    const card = start && start.closest('.wstep[data-target]');
+    if (!card || !end || end.closest('.wstep[data-target]') !== card) return null;
+    const walkEl = card.closest('.walk');
+    if (!walkEl || walkEl.classList.contains('closed')) return null;
+    let anchor = start.closest(ANCHORS);
+    if (!anchor || !card.contains(anchor) || anchor === card) {
+      anchor = start;
+      while (anchor.parentElement && anchor.parentElement !== card) anchor = anchor.parentElement;
+    }
+    return { card, anchor, text, walk: Number(walkEl.dataset.walk), rect: range.getBoundingClientRect() };
+  }
+  function hideSelAsk() {
+    selAskEl.hidden = true;
+    selInfo = null;
+  }
+  /** 選んだ部分のすぐ下 (画面の下端に近ければ上) に「質問する」を出す */
+  function updateSelAsk() {
+    const info = selectionInWalk();
+    if (!info) return hideSelAsk();
+    selInfo = info;
+    selAskEl.hidden = false;
+    const r = info.rect;
+    const w = selAskEl.offsetWidth;
+    const h = selAskEl.offsetHeight;
+    const below = r.bottom + 6 + h <= window.innerHeight;
+    selAskEl.style.top = `${Math.max(4, below ? r.bottom + 6 : r.top - h - 6)}px`;
+    selAskEl.style.left = `${Math.max(8, Math.min(r.left, window.innerWidth - w - 8))}px`;
+  }
+  document.addEventListener('mouseup', (e) => { if (e.target !== selAskEl) setTimeout(updateSelAsk, 0); });
+  document.addEventListener('keyup', (e) => { if (e.shiftKey || e.key === 'Shift') updateSelAsk(); });
+  document.addEventListener('selectionchange', () => { if (!selAskEl.hidden && !selectionInWalk()) hideSelAsk(); });
+  messagesEl.addEventListener('scroll', () => { if (!selAskEl.hidden) hideSelAsk(); });
+  // 押しても選んだ部分が外れないようにする
+  selAskEl.addEventListener('mousedown', (e) => e.preventDefault());
+  selAskEl.addEventListener('click', () => {
+    const info = selInfo || selectionInWalk();
+    hideSelAsk();
+    if (info) openAsk(info);
+  });
+
+  /** 選んだ部分の近くに、質問の入力欄を開く (送っていない入力欄は、いつも1つだけ) */
+  function openAsk(info) {
+    document.querySelectorAll('.qask.draft').forEach((b) => b.remove());
+    const box = el('div', 'kbox qask draft');
+    box.appendChild(kindTag('ask'));
+    box.appendChild(textBlock('qsel', `「${short(info.text, 80)}」`));
+    const form = el('div', 'qform');
+    const input = el('textarea', 'qinput');
+    input.rows = 2;
+    const row = el('div', 'qrow');
+    const send = el('button', 'primary');
+    send.textContent = '聞く';
+    const close = el('button', 'secondary');
+    close.textContent = '閉じる';
+    row.appendChild(send);
+    row.appendChild(close);
+    form.appendChild(input);
+    form.appendChild(row);
+    box.appendChild(form);
+    const submitAsk = () => {
+      const question = input.value.trim();
+      const id = `q${++askSeq}`;
+      box.classList.remove('draft');
+      form.remove();
+      if (question) box.appendChild(textBlock('qquestion', question));
+      const wait = el('div', 'qwait', '<span class="spinner"></span><span>回答を作成しています…</span>');
+      box.appendChild(wait);
+      askBoxes.set(id, { box, wait });
+      const card = info.card;
+      const target = card.dataset.target === 'step' ? { kind: 'step', index: Number(card.dataset.index) } : { kind: card.dataset.target };
+      vscode.postMessage({ type: 'walk_question', id, walk: info.walk, target, selection: info.text, question });
+    };
+    send.addEventListener('click', submitAsk);
+    close.addEventListener('click', () => box.remove());
+    input.addEventListener('keydown', (e) => {
+      // IME変換確定のEnterでは送らない
+      if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
+        e.preventDefault();
+        submitAsk();
+      } else if (e.key === 'Escape') box.remove();
+    });
+    info.anchor.after(box);
+    window.getSelection().removeAllRanges();
+    box.scrollIntoView({ block: 'nearest', behavior: calm ? 'auto' : 'smooth' });
+    input.focus();
+  }
+
+  /** 質問への回答を、質問した場所に出す */
+  function showAnswer(m) {
+    const entry = askBoxes.get(m.id);
+    if (!entry) return;
+    askBoxes.delete(m.id);
+    entry.wait.remove();
+    const { box } = entry;
+    if (m.error) box.appendChild(textBlock('attn', m.error));
+    else box.appendChild(el('div', 'wtext qanswer', renderMarkdown(m.text || '')));
+    // 閉じるボタンは、質問を入力していたときの「閉じる」と同じ見た目で、右に寄せる
+    const row = el('div', 'qrow');
+    const close = el('button', 'secondary');
+    close.textContent = '閉じる';
+    close.addEventListener('click', () => box.remove());
+    row.appendChild(close);
+    box.appendChild(row);
+  }
+
+  // ---------- 入力欄の表示 ----------
+  // 手順をたどっている間は、入力欄を隠す (送った文は続きの指示になり、手順が終わってしまうため。分からない言葉は、選んで質問する)。
+  // テストモードでは、画面の保存ボタンを使えるよう、ボタンの並びだけを残す
+  let walking = false;
+  function setWalking(on) {
+    walking = on;
+    updateComposer();
+  }
+  function updateComposer() {
+    const composer = $('composer');
+    composer.classList.toggle('walking', walking);
+    composer.hidden = walking && !state.testMode;
   }
 
   function flushStreaming() {
@@ -1047,6 +1241,7 @@
     $('testMode').checked = s.testMode;
     $('capture').hidden = !s.testMode;
     if (!s.busy) activity = '';
+    updateComposer();
     inputEl.disabled = !s.hasKey || !s.hasWorkspace;
     inputEl.placeholder = !s.hasWorkspace
       ? 'フォルダを開くと利用できます'
@@ -1159,6 +1354,9 @@
         hidePermission();
         walks.clear();
         askEls.clear();
+        askBoxes.clear();
+        hideSelAsk();
+        walking = false;
         streaming = null;
         $('meta').textContent = '';
         m.transcript.forEach(renderItem);
@@ -1178,6 +1376,7 @@
       case 'ask_cancel': askEls.get(m.id)?.querySelectorAll('button, input').forEach((x) => (x.disabled = true)); break;
       case 'activity': activity = m.text; updateStatus(); break;
       case 'capture': capture(m.css); break;
+      case 'walk_question_answer': showAnswer(m); break;
       case 'permission_request': showPermission(m); break;
       case 'permission_cancel': hidePermission(m.toolCallId); break;
     }
